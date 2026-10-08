@@ -19,6 +19,18 @@ flowchart LR
 
 The backend reads events and does not sign or submit transactions. The contract and backend RPC must use the same network for events to appear in the dashboard.
 
+### Configuration events
+
+Admin changes publish typed Soroban events for off-chain audit consumers:
+
+| Topic 0 | Additional topics | Value | Meaning |
+| --- | --- | --- | --- |
+| `agent_add` | administrator address, affected agent address | `true` | The agent was authorized. |
+| `agent_del` | administrator address, affected agent address | `false` | The agent was revoked. |
+| `threshold` | administrator address | `(previous_threshold, new_threshold)` as two `u32` values | The risk threshold changed. |
+
+The existing `flagged` event remains unchanged: its topics are `flagged`, agent address, and subject address, and its value is the `u32` score. The backend event reader currently filters only for `flagged`; decoding these configuration events is a separate follow-up. A failed or unauthorized call aborts before publishing an event.
+
 ## Testnet deployment
 
 The current Stellar Sentinel instance is deployed and initialized on the **Stellar Testnet**. It uses the Testnet network passphrase `Test SDF Network ; September 2015` and the Soroban RPC endpoint `https://soroban-testnet.stellar.org`.
@@ -100,5 +112,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `is_agent(agent)` — check agent authorization.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
+
+Successful `authorize_agent`, `revoke_agent`, and `set_threshold` calls also publish the corresponding configuration events described above.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.

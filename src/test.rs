@@ -1,6 +1,7 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::IntoVal;
 
 #[test]
 fn test_initialize_and_threshold() {
@@ -14,6 +15,83 @@ fn test_initialize_and_threshold() {
     client.initialize(&admin, &75);
     assert_eq!(client.get_threshold(), 75);
     assert!(!client.is_agent(&admin));
+}
+
+#[test]
+fn administrator_transfer_requires_both_parties_and_preserves_state() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let next_admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &75);
+    client.authorize_agent(&admin, &agent);
+    let wrong_admin = Address::generate(&env);
+    assert!(client
+        .try_transfer_admin(&wrong_admin, &next_admin)
+        .is_err());
+    assert_eq!(client.get_threshold(), 75);
+    assert!(client.is_agent(&agent));
+
+    let transfer = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "transfer_admin",
+        args: (&admin, &next_admin).into_val(&env),
+        sub_invokes: &[],
+    };
+    env.mock_auths(&[
+        MockAuth {
+            address: &admin,
+            invoke: &transfer,
+        },
+        MockAuth {
+            address: &next_admin,
+            invoke: &transfer,
+        },
+    ]);
+    client.transfer_admin(&admin, &next_admin);
+
+    env.mock_all_auths();
+    assert!(client.is_agent(&agent));
+    assert_eq!(client.get_threshold(), 75);
+    assert!(client.try_set_threshold(&admin, &80).is_err());
+    client.set_threshold(&next_admin, &80);
+    assert_eq!(client.get_threshold(), 80);
+}
+
+#[test]
+fn administrator_transfer_fails_without_new_admin_acceptance() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let next_admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &75);
+    client.authorize_agent(&admin, &agent);
+
+    let transfer = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "transfer_admin",
+        args: (&admin, &next_admin).into_val(&env),
+        sub_invokes: &[],
+    };
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &transfer,
+    }]);
+    assert!(client.try_transfer_admin(&admin, &next_admin).is_err());
+    env.mock_all_auths();
+    assert!(client.is_agent(&agent));
+    assert_eq!(client.get_threshold(), 75);
+    assert!(client.try_set_threshold(&next_admin, &80).is_err());
+    client.set_threshold(&admin, &70);
+    assert_eq!(client.get_threshold(), 70);
 }
 
 #[test]

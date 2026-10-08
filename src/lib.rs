@@ -1,5 +1,7 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
+};
 
 // Storage keys
 #[contracttype]
@@ -22,6 +24,7 @@ pub struct FlagRecord {
 }
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
+const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
 const MAX_SCORE: u32 = 100;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
@@ -66,9 +69,7 @@ impl StellarSentinel {
     pub fn revoke_agent(env: Env, admin: Address, agent: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Agent(agent), &false);
+        env.storage().instance().set(&DataKey::Agent(agent), &false);
         bump_instance_ttl(&env);
     }
 
@@ -97,41 +98,24 @@ impl StellarSentinel {
     /// the stable `flagged` event and records the latest flag for the subject.
     pub fn flag_anomaly(env: Env, agent: Address, subject: Address, score: u32) {
         agent.require_auth();
-        let is_agent: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::Agent(agent.clone()))
-            .unwrap_or(false);
-        if !is_agent {
-            panic!("not an authorized agent");
-        }
-        if score > MAX_SCORE {
-            panic!("score must be between 0 and 100");
-        }
-        let threshold: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RiskThreshold)
-            .expect("not initialized");
-        if score < threshold {
-            panic!("score below risk threshold");
-        }
-        let key = DataKey::LatestFlag(subject.clone());
-        let record = FlagRecord {
-            agent: agent.clone(),
-            score,
-            ledger: env.ledger().sequence(),
-            timestamp: env.ledger().timestamp(),
-        };
-        env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_TTL_THRESHOLD,
-            PERSISTENT_TTL_BUMP,
-        );
-        bump_instance_ttl(&env);
+        validate_flag(&env, &agent, score);
+        save_latest_flag(&env, &agent, &subject, score);
+        env.events().publish((FLAG_EVENT, agent, subject), score);
+    }
+
+    /// Submit a flag linked to an off-chain report digest without storing report contents.
+    pub fn flag_anomaly_v2(
+        env: Env,
+        agent: Address,
+        subject: Address,
+        score: u32,
+        report_digest: BytesN<32>,
+    ) {
+        agent.require_auth();
+        validate_flag(&env, &agent, score);
+        save_latest_flag(&env, &agent, &subject, score);
         env.events()
-            .publish((FLAG_EVENT, agent, subject), score);
+            .publish((FLAGGED_V2_EVENT, agent, subject, report_digest), score);
     }
 
     /// Return the latest recorded flag for a subject, if one exists.
@@ -151,13 +135,51 @@ impl StellarSentinel {
     }
 
     pub fn get_threshold(env: Env) -> u32 {
-        let threshold = env.storage()
+        let threshold = env
+            .storage()
             .instance()
             .get(&DataKey::RiskThreshold)
             .unwrap_or(0);
         bump_instance_ttl(&env);
         threshold
     }
+}
+
+fn validate_flag(env: &Env, agent: &Address, score: u32) {
+    let is_agent: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Agent(agent.clone()))
+        .unwrap_or(false);
+    if !is_agent {
+        panic!("not an authorized agent");
+    }
+    if score > MAX_SCORE {
+        panic!("score must be between 0 and 100");
+    }
+    let threshold: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::RiskThreshold)
+        .expect("not initialized");
+    if score < threshold {
+        panic!("score below risk threshold");
+    }
+}
+
+fn save_latest_flag(env: &Env, agent: &Address, subject: &Address, score: u32) {
+    let key = DataKey::LatestFlag(subject.clone());
+    let record = FlagRecord {
+        agent: agent.clone(),
+        score,
+        ledger: env.ledger().sequence(),
+        timestamp: env.ledger().timestamp(),
+    };
+    env.storage().persistent().set(&key, &record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+    bump_instance_ttl(env);
 }
 
 fn require_admin(env: &Env, admin: &Address) {

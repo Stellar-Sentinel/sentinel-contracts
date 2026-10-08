@@ -1,6 +1,7 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::{BytesN, Symbol, TryFromVal};
 
 #[test]
 fn test_initialize_and_threshold() {
@@ -152,4 +153,85 @@ fn agent_cannot_submit_score_above_100() {
     client.initialize(&admin, &75);
     client.authorize_agent(&admin, &agent);
     client.flag_anomaly(&agent, &subject, &101);
+}
+
+#[test]
+fn versioned_flag_emits_digest_and_updates_latest_record_without_changing_v1() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let legacy_subject = Address::generate(&env);
+    let versioned_subject = Address::generate(&env);
+    let digest = BytesN::from_array(&env, &[7; 32]);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &75);
+    client.authorize_agent(&admin, &agent);
+    client.flag_anomaly(&agent, &legacy_subject, &80);
+    let legacy_events = env.events().all();
+    assert_eq!(legacy_events.len(), 1);
+    let (_, topics, value) = legacy_events.get(0).unwrap();
+    assert_eq!(topics.len(), 3);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        symbol_short!("flagged")
+    );
+    assert_eq!(u32::try_from_val(&env, &value).unwrap(), 80);
+
+    client.flag_anomaly_v2(&agent, &versioned_subject, &90, &digest);
+    let versioned_events = env.events().all();
+    assert_eq!(versioned_events.len(), 1);
+    let (_, topics, value) = versioned_events.get(0).unwrap();
+    assert_eq!(topics.len(), 4);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        symbol_short!("flaggedv2")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        agent
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap(),
+        versioned_subject
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&env, &topics.get(3).unwrap()).unwrap(),
+        digest
+    );
+    assert_eq!(u32::try_from_val(&env, &value).unwrap(), 90);
+    assert_eq!(
+        client.get_latest_flag(&versioned_subject).unwrap().score,
+        90
+    );
+    assert_eq!(client.get_latest_flag(&legacy_subject).unwrap().score, 80);
+}
+
+#[test]
+fn versioned_flag_enforces_agent_and_score_checks() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let digest = BytesN::from_array(&env, &[9; 32]);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &75);
+    client.authorize_agent(&admin, &agent);
+    assert!(client
+        .try_flag_anomaly_v2(&stranger, &subject, &90, &digest)
+        .is_err());
+    assert!(client
+        .try_flag_anomaly_v2(&agent, &subject, &74, &digest)
+        .is_err());
+    assert!(client
+        .try_flag_anomaly_v2(&agent, &subject, &101, &digest)
+        .is_err());
+    assert_eq!(client.get_latest_flag(&subject), None);
+    assert!(env.events().all().is_empty());
 }

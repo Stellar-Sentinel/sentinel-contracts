@@ -99,6 +99,9 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold.
 - `is_agent(agent)` — check agent authorization.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
+- `flag_anomaly_v2(agent, subject, score, report_digest)` — same validation and latest-record update, with a versioned event carrying a fixed 32-byte report digest.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.
+
+`flag_anomaly_v2` preserves the original entry point and `flagged` event. It publishes `flaggedv2` with topics `(flaggedv2, agent, subject, report_digest)` and the `u32` score as event data. The digest is exactly 32 bytes; off-chain producers must agree on canonical report bytes before hashing (for example, SHA-256). Raw reports and the digest are not added to `FlagRecord`; `get_latest_flag` continues returning only the latest agent, score, ledger, and timestamp. The backend and dashboard still need to add a `flaggedv2` decoder to consume these events.

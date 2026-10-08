@@ -97,8 +97,11 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
 - `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage flagging agents.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold.
+- `pause(admin)` / `unpause(admin)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
 - `is_agent(agent)` — check agent authorization.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.
+
+Pausing is an emergency control for new `flag_anomaly` submissions. It does not erase existing flags or block read methods, and new deployments start unpaused. Only the administrator can pause or resume submissions.

@@ -153,3 +153,22 @@ fn agent_cannot_submit_score_above_100() {
     client.authorize_agent(&admin, &agent);
     client.flag_anomaly(&agent, &subject, &101);
 }
+
+#[test]
+fn agent_can_revoke_its_own_authorization_and_admin_can_restore_it() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    assert!(client.is_agent(&agent));
+    client.revoke_self(&agent);
+    client.revoke_self(&agent);
+    assert!(!client.is_agent(&agent));
+    client.authorize_agent(&admin, &agent);
+    assert!(client.is_agent(&agent));
+}

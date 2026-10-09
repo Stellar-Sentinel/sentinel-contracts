@@ -96,6 +96,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
 - `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage flagging agents.
+- `revoke_self(agent)` — let a signed agent address withdraw its own authorization.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold.
 - `is_agent(agent)` — check agent authorization.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.

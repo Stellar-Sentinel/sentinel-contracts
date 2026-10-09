@@ -72,6 +72,15 @@ impl StellarSentinel {
         bump_instance_ttl(&env);
     }
 
+    /// Allow an agent to withdraw its own authorization without admin action.
+    pub fn revoke_self(env: Env, agent: Address) {
+        agent.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::Agent(agent), &false);
+        bump_instance_ttl(&env);
+    }
+
     /// Admin-only: update the accepted risk score threshold (0 through 100).
     pub fn set_threshold(env: Env, admin: Address, threshold: u32) {
         admin.require_auth();

@@ -7,6 +7,7 @@ pub enum DataKey {
     Admin,
     Agent(Address),
     RiskThreshold,
+    Paused,
     LatestFlag(Address),
     // Append registry storage to preserve existing storage-key encoding.
     AgentRegistry,
@@ -33,20 +34,30 @@ pub struct FlagSubmission {
 }
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
+const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
+const AGENT_DEL_EVENT: Symbol = symbol_short!("agent_del");
+const THRESHOLD_EVENT: Symbol = symbol_short!("threshold");
 const MAX_SCORE: u32 = 100;
 const MAX_AGENT_GRANT_LEDGERS: u32 = 100_000;
+const INTERFACE_VERSION: u32 = 1;
 const MAX_FLAG_BATCH: u32 = 16;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
 const PERSISTENT_TTL_BUMP: u32 = 100_000;
 const MAX_AUTHORIZED_AGENTS: u32 = 128;
+const MAX_AGENT_BATCH: u32 = 16;
 
 #[contract]
 pub struct StellarSentinel;
 
 #[contractimpl]
 impl StellarSentinel {
+    /// Return the external contract interface generation.
+    pub fn get_interface_version() -> u32 {
+        INTERFACE_VERSION
+    }
+
     /// One-time setup. Sets the contract admin and a default risk threshold.
     pub fn initialize(env: Env, admin: Address, default_threshold: u32) {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -60,9 +71,21 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &default_threshold);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    /// Return the configured contract administrator.
+    pub fn get_admin(env: Env) -> Address {
+        let admin = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        bump_instance_ttl(&env);
+        admin
     }
 
     /// Transfer administration in one operation accepted by both addresses.
@@ -85,33 +108,39 @@ impl StellarSentinel {
         admin.require_auth();
         require_admin(&env, &admin);
         add_agent_to_registry(&env, &agent);
-        env.storage()
-            .instance()
-            .set(&DataKey::Agent(agent.clone()), &true);
-        env.storage().instance().remove(&DataKey::AgentExpiry(agent));
+        env.storage().instance().set(&DataKey::Agent(agent.clone()), &true);
+        env.storage().instance().remove(&DataKey::AgentExpiry(agent.clone()));
         bump_instance_ttl(&env);
+        env.events().publish((AGENT_ADD_EVENT, admin, agent), true);
     }
 
     /// Admin-only: authorize an agent until a bounded future ledger.
-    pub fn authorize_agent_until(
-        env: Env,
-        admin: Address,
-        agent: Address,
-        expires_at_ledger: u32,
-    ) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn authorize_agent_until(env: Env, admin: Address, agent: Address, expires_at_ledger: u32) {
+        admin.require_auth(); require_admin(&env, &admin);
         let current_ledger = env.ledger().sequence();
-        if expires_at_ledger <= current_ledger
-            || expires_at_ledger - current_ledger > MAX_AGENT_GRANT_LEDGERS
-        {
+        if expires_at_ledger <= current_ledger || expires_at_ledger - current_ledger > MAX_AGENT_GRANT_LEDGERS {
             panic!("agent grant expiry must be within the next 100000 ledgers");
         }
         add_agent_to_registry(&env, &agent);
         env.storage().instance().set(&DataKey::Agent(agent.clone()), &true);
-        env.storage()
-            .instance()
-            .set(&DataKey::AgentExpiry(agent), &expires_at_ledger);
+        env.storage().instance().set(&DataKey::AgentExpiry(agent.clone()), &expires_at_ledger);
+        bump_instance_ttl(&env);
+        env.events().publish((AGENT_ADD_EVENT, admin, agent), true);
+    }
+
+    /// Admin-only: authorize up to MAX_AGENT_BATCH addresses in one call.
+    /// Repeated addresses are idempotent, matching authorize_agent.
+    pub fn authorize_agents(env: Env, admin: Address, agents: Vec<Address>) {
+        admin.require_auth(); require_admin(&env, &admin);
+        if agents.len() > MAX_AGENT_BATCH { panic!("agent batch exceeds maximum"); }
+        for agent in agents {
+            let authorized = agent_is_authorized(&env, &agent);
+            if !authorized {
+                add_agent_to_registry(&env, &agent);
+                env.storage().instance().set(&DataKey::Agent(agent.clone()), &true);
+                env.storage().instance().remove(&DataKey::AgentExpiry(agent));
+            }
+        }
         bump_instance_ttl(&env);
     }
 
@@ -122,8 +151,25 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::Agent(agent.clone()), &false);
-        env.storage().instance().remove(&DataKey::AgentExpiry(agent));
+        env.storage().instance().remove(&DataKey::AgentExpiry(agent.clone()));
         remove_agent_from_registry(&env, &agent);
+        bump_instance_ttl(&env);
+        env.events().publish((AGENT_DEL_EVENT, admin, agent), false);
+    }
+
+    /// Admin-only: revoke up to MAX_AGENT_BATCH addresses in one call.
+    /// Repeated or already-revoked addresses are idempotent.
+    pub fn revoke_agents(env: Env, admin: Address, agents: Vec<Address>) {
+        admin.require_auth(); require_admin(&env, &admin);
+        if agents.len() > MAX_AGENT_BATCH { panic!("agent batch exceeds maximum"); }
+        for agent in agents {
+            let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
+            if authorized {
+                env.storage().instance().set(&DataKey::Agent(agent.clone()), &false);
+                env.storage().instance().remove(&DataKey::AgentExpiry(agent.clone()));
+                remove_agent_from_registry(&env, &agent);
+            }
+        }
         bump_instance_ttl(&env);
     }
 
@@ -131,17 +177,9 @@ impl StellarSentinel {
     pub fn get_agents(env: Env, admin: Address) -> Vec<Address> {
         admin.require_auth();
         require_admin(&env, &admin);
-        let agents = env
-            .storage()
-            .instance()
-            .get(&DataKey::AgentRegistry)
-            .unwrap_or(Vec::new(&env));
+        let agents = env.storage().instance().get(&DataKey::AgentRegistry).unwrap_or(Vec::new(&env));
         let mut active = Vec::new(&env);
-        for agent in agents.iter() {
-            if agent_is_authorized(&env, &agent) {
-                active.push_back(agent);
-            }
-        }
+        for agent in agents.iter() { if agent_is_authorized(&env, &agent) { active.push_back(agent); } }
         bump_instance_ttl(&env);
         active
     }
@@ -153,10 +191,41 @@ impl StellarSentinel {
         if threshold > MAX_SCORE {
             panic!("threshold must be between 0 and 100");
         }
+        let previous: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold)
+            .expect("not initialized");
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &threshold);
         bump_instance_ttl(&env);
+        env.events()
+            .publish((THRESHOLD_EVENT, admin), (previous, threshold));
+    }
+
+    /// Admin-only: stop agent flag submissions.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance_ttl(&env);
+    }
+
+    /// Admin-only: resume agent flag submissions.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance_ttl(&env);
+    }
+
+    /// Report whether new flag submissions are currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn is_agent(env: Env, agent: Address) -> bool {
@@ -169,6 +238,14 @@ impl StellarSentinel {
     /// anomalous. Scores below the configured threshold are rejected. Emits
     /// the stable `flagged` event and records the latest flag for the subject.
     pub fn flag_anomaly(env: Env, agent: Address, subject: Address, score: u32) {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            panic!("contract is paused");
+        }
         agent.require_auth();
         if !agent_is_authorized(&env, &agent) {
             panic!("not an authorized agent");
@@ -192,14 +269,11 @@ impl StellarSentinel {
             timestamp: env.ledger().timestamp(),
         };
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_TTL_THRESHOLD,
-            PERSISTENT_TTL_BUMP,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
         bump_instance_ttl(&env);
-        env.events()
-            .publish((FLAG_EVENT, agent, subject), score);
+        env.events().publish((FLAG_EVENT, agent, subject), score);
     }
 
     /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.
@@ -263,38 +337,55 @@ impl StellarSentinel {
     }
 
     pub fn get_threshold(env: Env) -> u32 {
-        let threshold = env.storage()
+        let threshold = env
+            .storage()
             .instance()
             .get(&DataKey::RiskThreshold)
             .unwrap_or(0);
         bump_instance_ttl(&env);
         threshold
     }
+
+    /// Report whether a score is within the contract range and meets policy.
+    /// This query is advisory; flag_anomaly repeats the checks on-chain.
+    pub fn is_score_accepted(env: Env, score: u32) -> bool {
+        let threshold: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold);
+        match threshold {
+            Some(threshold) => {
+                bump_instance_ttl(&env);
+                score <= MAX_SCORE && score >= threshold
+            }
+            None => false,
+        }
+    }
+}
+
+fn agent_is_authorized(env: &Env, agent: &Address) -> bool {
+    let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
+    if !authorized { return false; }
+    let expiry: Option<u32> = env.storage().instance().get(&DataKey::AgentExpiry(agent.clone()));
+    expiry.map(|ledger| env.ledger().sequence() < ledger).unwrap_or(true)
 }
 
 fn add_agent_to_registry(env: &Env, agent: &Address) {
-    let agents: Vec<Address> = env
+    let mut agents: Vec<Address> = env
         .storage()
         .instance()
         .get(&DataKey::AgentRegistry)
         .unwrap_or(Vec::new(env));
-    let mut active = Vec::new(env);
-    for registered in agents.iter() {
-        if registered != agent.clone() && agent_is_authorized(env, &registered) {
-            active.push_back(registered);
-        }
-    }
-    if agent_is_authorized(env, agent) && active.contains(agent) {
-        env.storage().instance().set(&DataKey::AgentRegistry, &active);
+    if agents.contains(agent) {
         return;
     }
-    if active.len() >= MAX_AUTHORIZED_AGENTS {
+    if agents.len() >= MAX_AUTHORIZED_AGENTS {
         panic!("agent registry is full");
     }
-    active.push_back(agent.clone());
+    agents.push_back(agent.clone());
     env.storage()
         .instance()
-        .set(&DataKey::AgentRegistry, &active);
+        .set(&DataKey::AgentRegistry, &agents);
 }
 
 fn remove_agent_from_registry(env: &Env, agent: &Address) {
@@ -323,24 +414,6 @@ fn require_admin(env: &Env, admin: &Address) {
     if stored_admin != *admin {
         panic!("unauthorized");
     }
-}
-
-fn agent_is_authorized(env: &Env, agent: &Address) -> bool {
-    let authorized: bool = env
-        .storage()
-        .instance()
-        .get(&DataKey::Agent(agent.clone()))
-        .unwrap_or(false);
-    if !authorized {
-        return false;
-    }
-    let expiry: Option<u32> = env
-        .storage()
-        .instance()
-        .get(&DataKey::AgentExpiry(agent.clone()));
-    expiry
-        .map(|expires_at| env.ledger().sequence() < expires_at)
-        .unwrap_or(true)
 }
 
 fn bump_instance_ttl(env: &Env) {

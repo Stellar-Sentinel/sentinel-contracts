@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 // Storage keys
 #[contracttype]
@@ -21,8 +21,17 @@ pub struct FlagRecord {
     pub timestamp: u64,
 }
 
+/// A single subject and risk score in a bounded agent submission batch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlagSubmission {
+    pub subject: Address,
+    pub score: u32,
+}
+
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const MAX_SCORE: u32 = 100;
+const MAX_FLAG_BATCH: u32 = 16;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
@@ -132,6 +141,55 @@ impl StellarSentinel {
         bump_instance_ttl(&env);
         env.events()
             .publish((FLAG_EVENT, agent, subject), score);
+    }
+
+    /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.
+    pub fn flag_anomalies(env: Env, agent: Address, submissions: Vec<FlagSubmission>) {
+        agent.require_auth();
+        if submissions.len() == 0 || submissions.len() > MAX_FLAG_BATCH {
+            panic!("flag batch size must be between 1 and 16");
+        }
+        let is_agent: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Agent(agent.clone()))
+            .unwrap_or(false);
+        if !is_agent {
+            panic!("not an authorized agent");
+        }
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold)
+            .expect("not initialized");
+        for submission in submissions.clone() {
+            if submission.score > MAX_SCORE {
+                panic!("score must be between 0 and 100");
+            }
+            if submission.score < threshold {
+                panic!("score below risk threshold");
+            }
+        }
+        for submission in submissions {
+            let key = DataKey::LatestFlag(submission.subject.clone());
+            let record = FlagRecord {
+                agent: agent.clone(),
+                score: submission.score,
+                ledger: env.ledger().sequence(),
+                timestamp: env.ledger().timestamp(),
+            };
+            env.storage().persistent().set(&key, &record);
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_TTL_THRESHOLD,
+                PERSISTENT_TTL_BUMP,
+            );
+            env.events().publish(
+                (FLAG_EVENT, agent.clone(), submission.subject),
+                submission.score,
+            );
+        }
+        bump_instance_ttl(&env);
     }
 
     /// Return the latest recorded flag for a subject, if one exists.

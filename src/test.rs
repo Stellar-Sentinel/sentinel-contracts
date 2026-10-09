@@ -382,3 +382,38 @@ fn agent_registry_rejects_more_than_its_maximum() {
         client.authorize_agent(&admin, &Address::generate(&env));
     }
 }
+
+
+#[test]
+fn pause_stops_flags_without_blocking_reads_and_unpause_recovers() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    assert!(!client.is_paused());
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.flag_anomaly(&agent, &subject, &80);
+    let original = client.get_latest_flag(&subject);
+
+    let stranger = Address::generate(&env);
+    assert!(client.try_pause(&stranger).is_err());
+    assert!(!client.is_paused());
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+    assert_eq!(client.get_threshold(), 70);
+    assert_eq!(client.get_latest_flag(&subject), original);
+    assert!(client.try_flag_anomaly(&agent, &subject, &90).is_err());
+    assert_eq!(client.get_latest_flag(&subject), original);
+    assert!(env.events().all().is_empty());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+    client.flag_anomaly(&agent, &subject, &90);
+    assert_eq!(client.get_latest_flag(&subject).unwrap().score, 90);
+}

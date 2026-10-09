@@ -51,6 +51,17 @@ impl StellarSentinel {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
     }
 
+    /// Return the configured contract administrator.
+    pub fn get_admin(env: Env) -> Address {
+        let admin = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        bump_instance_ttl(&env);
+        admin
+    }
+
     /// Admin-only: authorize an address to act as a monitoring agent.
     /// TODO(#issue): role separation between "monitor" and "responder" agents
     /// is not implemented yet — every authorized agent currently has full

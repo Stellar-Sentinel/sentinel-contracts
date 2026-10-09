@@ -35,7 +35,11 @@ pub struct FlagSubmission {
 }
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
+const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
+const AGENT_DEL_EVENT: Symbol = symbol_short!("agent_del");
+const THRESHOLD_EVENT: Symbol = symbol_short!("threshold");
 const MAX_SCORE: u32 = 100;
+const INTERFACE_VERSION: u32 = 1;
 const MAX_FLAG_BATCH: u32 = 16;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
@@ -43,12 +47,18 @@ const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
 const PERSISTENT_TTL_BUMP: u32 = 100_000;
 const HARD_AGENT_CAPACITY: u32 = 128;
 const MAX_AUTHORIZED_AGENTS: u32 = HARD_AGENT_CAPACITY;
+const MAX_AGENT_BATCH: u32 = 16;
 
 #[contract]
 pub struct StellarSentinel;
 
 #[contractimpl]
 impl StellarSentinel {
+    /// Return the external contract interface generation.
+    pub fn get_interface_version() -> u32 {
+        INTERFACE_VERSION
+    }
+
     /// One-time setup. Sets the contract admin and a default risk threshold.
     pub fn initialize(env: Env, admin: Address, default_threshold: u32) {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -62,12 +72,23 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &default_threshold);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::AgentCount, &0_u32);
         env.storage().instance().set(&DataKey::AgentCapacity, &HARD_AGENT_CAPACITY);
-        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    /// Return the configured contract administrator.
+    pub fn get_admin(env: Env) -> Address {
+        let admin = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        bump_instance_ttl(&env);
+        admin
     }
 
     /// Transfer administration in one operation accepted by both addresses.
@@ -87,8 +108,7 @@ impl StellarSentinel {
     /// is not implemented yet — every authorized agent currently has full
     /// flagging rights. See CONTRIBUTING for the open issue.
     pub fn authorize_agent(env: Env, admin: Address, agent: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        admin.require_auth(); require_admin(&env, &admin);
         let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
         if !authorized {
             let count: u32 = env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration");
@@ -96,7 +116,27 @@ impl StellarSentinel {
             if count >= capacity { panic!("agent capacity reached"); }
             add_agent_to_registry(&env, &agent);
             env.storage().instance().set(&DataKey::AgentCount, &(count + 1));
-            env.storage().instance().set(&DataKey::Agent(agent), &true);
+            env.storage().instance().set(&DataKey::Agent(agent.clone()), &true);
+        }
+        bump_instance_ttl(&env);
+        env.events().publish((AGENT_ADD_EVENT, admin, agent), true);
+    }
+
+    /// Admin-only: authorize up to MAX_AGENT_BATCH addresses in one call.
+    /// Repeated addresses are idempotent, matching authorize_agent.
+    pub fn authorize_agents(env: Env, admin: Address, agents: Vec<Address>) {
+        admin.require_auth(); require_admin(&env, &admin);
+        if agents.len() > MAX_AGENT_BATCH { panic!("agent batch exceeds maximum"); }
+        for agent in agents {
+            let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
+            if !authorized {
+                let count: u32 = env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration");
+                let capacity: u32 = env.storage().instance().get(&DataKey::AgentCapacity).expect("agent capacity requires migration");
+                if count >= capacity { panic!("agent capacity reached"); }
+                add_agent_to_registry(&env, &agent);
+                env.storage().instance().set(&DataKey::AgentCount, &(count + 1));
+                env.storage().instance().set(&DataKey::Agent(agent), &true);
+            }
         }
         bump_instance_ttl(&env);
     }
@@ -114,38 +154,42 @@ impl StellarSentinel {
             remove_agent_from_registry(&env, &agent);
         }
         bump_instance_ttl(&env);
+        env.events().publish((AGENT_DEL_EVENT, admin, agent), false);
     }
 
-    /// Admin-only: choose an operational limit up to the hard maximum.
+    /// Admin-only: revoke up to MAX_AGENT_BATCH addresses in one call.
+    /// Repeated or already-revoked addresses are idempotent.
+    pub fn revoke_agents(env: Env, admin: Address, agents: Vec<Address>) {
+        admin.require_auth(); require_admin(&env, &admin);
+        if agents.len() > MAX_AGENT_BATCH { panic!("agent batch exceeds maximum"); }
+        for agent in agents {
+            let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
+            if authorized {
+                let count: u32 = env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration");
+                if count == 0 { panic!("agent count invariant violated"); }
+                env.storage().instance().set(&DataKey::AgentCount, &(count - 1));
+                env.storage().instance().set(&DataKey::Agent(agent.clone()), &false);
+                remove_agent_from_registry(&env, &agent);
+            }
+        }
+        bump_instance_ttl(&env);
+    }
+
     pub fn set_agent_capacity(env: Env, admin: Address, capacity: u32) {
         admin.require_auth(); require_admin(&env, &admin);
         if capacity > HARD_AGENT_CAPACITY { panic!("agent capacity exceeds hard maximum"); }
         let count: u32 = env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration");
         if capacity < count { panic!("agent capacity cannot be below active count"); }
-        env.storage().instance().set(&DataKey::AgentCapacity, &capacity);
-        bump_instance_ttl(&env);
+        env.storage().instance().set(&DataKey::AgentCapacity, &capacity); bump_instance_ttl(&env);
     }
-
-    /// Admin-only one-time migration for already deployed instances.
     pub fn migrate_agent_capacity(env: Env, admin: Address, active_count: u32, capacity: u32) {
         admin.require_auth(); require_admin(&env, &admin);
-        if env.storage().instance().has(&DataKey::AgentCount) || env.storage().instance().has(&DataKey::AgentCapacity) {
-            panic!("agent capacity already initialized");
-        }
-        if active_count > HARD_AGENT_CAPACITY || capacity > HARD_AGENT_CAPACITY || capacity < active_count {
-            panic!("invalid migrated agent capacity");
-        }
-        env.storage().instance().set(&DataKey::AgentCount, &active_count);
-        env.storage().instance().set(&DataKey::AgentCapacity, &capacity);
-        bump_instance_ttl(&env);
+        if env.storage().instance().has(&DataKey::AgentCount) || env.storage().instance().has(&DataKey::AgentCapacity) { panic!("agent capacity already initialized"); }
+        if active_count > HARD_AGENT_CAPACITY || capacity > HARD_AGENT_CAPACITY || capacity < active_count { panic!("invalid migrated agent capacity"); }
+        env.storage().instance().set(&DataKey::AgentCount, &active_count); env.storage().instance().set(&DataKey::AgentCapacity, &capacity); bump_instance_ttl(&env);
     }
-
-    pub fn get_agent_capacity(env: Env) -> u32 {
-        env.storage().instance().get(&DataKey::AgentCapacity).expect("agent capacity requires migration")
-    }
-    pub fn get_agent_count(env: Env) -> u32 {
-        env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration")
-    }
+    pub fn get_agent_capacity(env: Env) -> u32 { env.storage().instance().get(&DataKey::AgentCapacity).expect("agent capacity requires migration") }
+    pub fn get_agent_count(env: Env) -> u32 { env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration") }
 
     /// Return the active agent registry to the administrator.
     pub fn get_agents(env: Env, admin: Address) -> Vec<Address> {
@@ -167,10 +211,17 @@ impl StellarSentinel {
         if threshold > MAX_SCORE {
             panic!("threshold must be between 0 and 100");
         }
+        let previous: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold)
+            .expect("not initialized");
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &threshold);
         bump_instance_ttl(&env);
+        env.events()
+            .publish((THRESHOLD_EVENT, admin), (previous, threshold));
     }
 
     /// Admin-only: stop agent flag submissions.
@@ -246,14 +297,11 @@ impl StellarSentinel {
             timestamp: env.ledger().timestamp(),
         };
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_TTL_THRESHOLD,
-            PERSISTENT_TTL_BUMP,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
         bump_instance_ttl(&env);
-        env.events()
-            .publish((FLAG_EVENT, agent, subject), score);
+        env.events().publish((FLAG_EVENT, agent, subject), score);
     }
 
     /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.
@@ -322,12 +370,29 @@ impl StellarSentinel {
     }
 
     pub fn get_threshold(env: Env) -> u32 {
-        let threshold = env.storage()
+        let threshold = env
+            .storage()
             .instance()
             .get(&DataKey::RiskThreshold)
             .unwrap_or(0);
         bump_instance_ttl(&env);
         threshold
+    }
+
+    /// Report whether a score is within the contract range and meets policy.
+    /// This query is advisory; flag_anomaly repeats the checks on-chain.
+    pub fn is_score_accepted(env: Env, score: u32) -> bool {
+        let threshold: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold);
+        match threshold {
+            Some(threshold) => {
+                bump_instance_ttl(&env);
+                score <= MAX_SCORE && score >= threshold
+            }
+            None => false,
+        }
     }
 }
 

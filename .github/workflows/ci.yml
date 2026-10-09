@@ -11,7 +11,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - run: cargo update -p ed25519-dalek@3.0.0 --precise 2.1.1
-      - run: cargo build --target wasm32-unknown-unknown --release
-      - run: cargo test
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build --locked --target wasm32-unknown-unknown --release
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings

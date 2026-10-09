@@ -5,6 +5,10 @@
 
 Soroban contract for administrator-managed monitoring agents, a configurable 0–100 score threshold, and account flags. It publishes `flagged` events and stores the latest flag for each subject. It does not store full history; event indexing is needed for that.
 
+## Agent registry
+
+`get_agents` returns the administrator-authenticated list of active legacy agents. The registry is capped at 128 unique addresses; repeated authorization is idempotent, and revocation removes the address so capacity is released. Existing agent mapping storage remains intact, and the new registry key is appended to the storage-key enum.
+
 ## Architecture
 
 ```mermaid
@@ -95,13 +99,18 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 ## Contract interface
 
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
+- `transfer_admin(current_admin, new_admin)` — atomically transfer control; both addresses must authorize the same invocation.
 - `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage flagging agents.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold.
-- `is_agent(agent)` — check agent authorization.
+- `is_agent(agent)` — check agent authorization and extend the active contract instance TTL.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
-- `flag_anomaly_v2(agent, subject, score, report_digest)` — same validation and latest-record update, with a versioned event carrying a fixed 32-byte report digest.
+- `flag_anomaly_v2(agent, subject, score, report_digest)` — apply the same validation and record update, then publish a versioned event with a fixed 32-byte report digest.
+- `flag_anomalies(agent, submissions)` — submit 1–16 subject/score entries in one transaction, validating the full batch before writes.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.
+
+For an administrator handover, prepare one `transfer_admin` invocation authorized by both the current admin and the proposed admin. The operation fails without either authorization, and the proposed address becomes the sole administrator after success. Verify the new administrator can call an admin-only method before removing access to the old signing setup.
+
 
 `flag_anomaly_v2` preserves the original entry point and `flagged` event. It publishes `flaggedv2` with topics `(flaggedv2, agent, subject, report_digest)` and the `u32` score as event data. The digest is exactly 32 bytes; off-chain producers must agree on canonical report bytes before hashing (for example, SHA-256). Raw reports and the digest are not added to `FlagRecord`; `get_latest_flag` continues returning only the latest agent, score, ledger, and timestamp. The backend and dashboard still need to add a `flaggedv2` decoder to consume these events.

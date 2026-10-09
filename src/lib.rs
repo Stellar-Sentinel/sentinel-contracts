@@ -150,6 +150,16 @@ impl StellarSentinel {
         record
     }
 
+    /// Admin-only: clear the current flag record without affecting event history.
+    pub fn clear_latest_flag(env: Env, admin: Address, subject: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LatestFlag(subject));
+        bump_instance_ttl(&env);
+    }
+
     pub fn get_threshold(env: Env) -> u32 {
         let threshold = env.storage()
             .instance()

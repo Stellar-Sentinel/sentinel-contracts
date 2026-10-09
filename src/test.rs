@@ -153,3 +153,39 @@ fn agent_cannot_submit_score_above_100() {
     client.authorize_agent(&admin, &agent);
     client.flag_anomaly(&agent, &subject, &101);
 }
+
+#[test]
+fn admin_can_clear_latest_flag_and_repeat_the_clear() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.flag_anomaly(&agent, &subject, &90);
+    assert!(client.get_latest_flag(&subject).is_some());
+
+    client.clear_latest_flag(&admin, &subject);
+    assert_eq!(client.get_latest_flag(&subject), None);
+    client.clear_latest_flag(&admin, &subject);
+    assert_eq!(client.get_latest_flag(&subject), None);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn non_admin_cannot_clear_latest_flag() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let other = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.clear_latest_flag(&other, &subject);
+}

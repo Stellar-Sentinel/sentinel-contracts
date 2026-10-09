@@ -100,5 +100,6 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `is_agent(agent)` — check agent authorization.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
+- `clear_latest_flag(admin, subject)` — remove the current record while leaving historical `flagged` events unchanged.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.

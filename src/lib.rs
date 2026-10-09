@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec};
 
 // Storage keys
 #[contracttype]
@@ -33,6 +33,7 @@ pub struct FlagSubmission {
 }
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
+const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
 const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
 const AGENT_DEL_EVENT: Symbol = symbol_short!("agent_del");
 const THRESHOLD_EVENT: Symbol = symbol_short!("threshold");
@@ -267,6 +268,23 @@ impl StellarSentinel {
             .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
         bump_instance_ttl(&env);
         env.events().publish((FLAG_EVENT, agent, subject), score);
+    }
+
+    /// Submit a flag linked to an off-chain report digest without storing report contents.
+    pub fn flag_anomaly_v2(env: Env, agent: Address, subject: Address, score: u32, report_digest: BytesN<32>) {
+        if env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false) { panic!("contract is paused"); }
+        if env.storage().instance().get::<_, bool>(&DataKey::GuardianPaused).unwrap_or(false) { panic!("emergency guardian paused contract"); }
+        agent.require_auth();
+        if !has_responder_role(&env, &agent) { panic!("not an authorized agent"); }
+        if score > MAX_SCORE { panic!("score must be between 0 and 100"); }
+        let threshold: u32 = env.storage().instance().get(&DataKey::RiskThreshold).expect("not initialized");
+        if score < threshold { panic!("score below risk threshold"); }
+        let key = DataKey::LatestFlag(subject.clone());
+        let record = FlagRecord { agent: agent.clone(), score, ledger: env.ledger().sequence(), timestamp: env.ledger().timestamp() };
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+        bump_instance_ttl(&env);
+        env.events().publish((FLAGGED_V2_EVENT, agent, subject, report_digest), score);
     }
 
     /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.

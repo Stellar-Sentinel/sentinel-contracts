@@ -120,6 +120,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `pause(admin)` / `unpause(admin)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
 - `is_agent(agent)` — check agent authorization and extend the active contract instance TTL.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
+- `flag_anomaly_v2(agent, subject, score, report_digest)` — apply the same validation and record update, then publish a versioned event with a fixed 32-byte report digest.
 - `flag_anomalies(agent, submissions)` — submit 1–16 subject/score entries in one transaction, validating the full batch before writes.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
 
@@ -130,3 +131,5 @@ Only trusted addresses should receive agent authorization. The contract enforces
 Pausing is an emergency control for new `flag_anomaly` submissions. It does not erase existing flags or block read methods, and new deployments start unpaused. Only the administrator can pause or resume submissions.
 
 For an administrator handover, prepare one `transfer_admin` invocation authorized by both the current admin and the proposed admin. The operation fails without either authorization, and the proposed address becomes the sole administrator after success. Verify the new administrator can call an admin-only method before removing access to the old signing setup.
+
+`flag_anomaly_v2` preserves the original entry point and `flagged` event. It publishes `flaggedv2` with topics `(flaggedv2, agent, subject, report_digest)` and the `u32` score as event data. The digest is exactly 32 bytes; off-chain producers must agree on canonical report bytes before hashing (for example, SHA-256). Raw reports and the digest are not added to `FlagRecord`; `get_latest_flag` continues returning only the latest agent, score, ledger, and timestamp. The backend and dashboard still need to add a `flaggedv2` decoder to consume these events.

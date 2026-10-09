@@ -102,3 +102,5 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `get_latest_flag(subject)` — read the latest record, if one exists.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.
+
+Initialization publishes an `init` event and successful threshold updates publish a `threshold` event. Each event includes the administrator address as a topic and the resulting threshold as its data.

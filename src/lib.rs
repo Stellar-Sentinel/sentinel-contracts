@@ -22,6 +22,8 @@ pub struct FlagRecord {
 }
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
+const INIT_EVENT: Symbol = symbol_short!("init");
+const THRESHOLD_EVENT: Symbol = symbol_short!("threshold");
 const MAX_SCORE: u32 = 100;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
@@ -46,6 +48,8 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &default_threshold);
+        env.events()
+            .publish((INIT_EVENT, admin.clone()), default_threshold);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
@@ -82,6 +86,8 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &threshold);
+        env.events()
+            .publish((THRESHOLD_EVENT, admin.clone()), threshold);
         bump_instance_ttl(&env);
     }
 

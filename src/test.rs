@@ -1,6 +1,6 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
 
 #[test]
 fn test_initialize_and_threshold() {
@@ -152,4 +152,18 @@ fn agent_cannot_submit_score_above_100() {
     client.initialize(&admin, &75);
     client.authorize_agent(&admin, &agent);
     client.flag_anomaly(&agent, &subject, &101);
+}
+
+#[test]
+fn initialization_and_threshold_changes_publish_audit_events() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.set_threshold(&admin, &80);
+
+    assert_eq!(env.events().all().len(), 2);
 }

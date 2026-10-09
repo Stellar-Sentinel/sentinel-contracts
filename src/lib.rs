@@ -8,6 +8,7 @@ pub enum DataKey {
     Agent(Address),
     RiskThreshold,
     LatestFlag(Address),
+    StorageVersion,
 }
 
 /// Latest flag recorded for a subject. Soroban events remain the append-only
@@ -23,6 +24,7 @@ pub struct FlagRecord {
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const MAX_SCORE: u32 = 100;
+const STORAGE_VERSION: u32 = 1;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
@@ -48,7 +50,45 @@ impl StellarSentinel {
             .set(&DataKey::RiskThreshold, &default_threshold);
         env.storage()
             .instance()
+            .set(&DataKey::StorageVersion, &STORAGE_VERSION);
+        env.storage()
+            .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    /// Return the stored schema version, or zero for a legacy/uninitialized instance.
+    pub fn get_storage_version(env: Env) -> u32 {
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(0);
+        if version > 0 {
+            bump_instance_ttl(&env);
+        }
+        version
+    }
+
+    /// Backfill the schema version on a legacy initialized instance.
+    pub fn migrate_storage_version(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let current: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageVersion);
+        match current {
+            None => env
+                .storage()
+                .instance()
+                .set(&DataKey::StorageVersion, &STORAGE_VERSION),
+            Some(STORAGE_VERSION) => {
+                bump_instance_ttl(&env);
+                return;
+            }
+            Some(_) => panic!("unsupported storage version"),
+        }
+        bump_instance_ttl(&env);
     }
 
     /// Admin-only: authorize an address to act as a monitoring agent.

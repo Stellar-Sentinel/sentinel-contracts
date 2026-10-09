@@ -6,6 +6,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, E
 pub enum DataKey {
     Admin,
     Agent(Address),
+    AgentExpiry(Address),
     RiskThreshold,
     LatestFlag(Address),
 }
@@ -23,6 +24,7 @@ pub struct FlagRecord {
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const MAX_SCORE: u32 = 100;
+const MAX_AGENT_GRANT_LEDGERS: u32 = 100_000;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
@@ -58,7 +60,32 @@ impl StellarSentinel {
     pub fn authorize_agent(env: Env, admin: Address, agent: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
-        env.storage().instance().set(&DataKey::Agent(agent), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::Agent(agent.clone()), &true);
+        env.storage().instance().remove(&DataKey::AgentExpiry(agent));
+        bump_instance_ttl(&env);
+    }
+
+    /// Admin-only: authorize an agent until a bounded future ledger.
+    pub fn authorize_agent_until(
+        env: Env,
+        admin: Address,
+        agent: Address,
+        expires_at_ledger: u32,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let current_ledger = env.ledger().sequence();
+        if expires_at_ledger <= current_ledger
+            || expires_at_ledger - current_ledger > MAX_AGENT_GRANT_LEDGERS
+        {
+            panic!("agent grant expiry must be within the next 100000 ledgers");
+        }
+        env.storage().instance().set(&DataKey::Agent(agent.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::AgentExpiry(agent), &expires_at_ledger);
         bump_instance_ttl(&env);
     }
 
@@ -68,7 +95,8 @@ impl StellarSentinel {
         require_admin(&env, &admin);
         env.storage()
             .instance()
-            .set(&DataKey::Agent(agent), &false);
+            .set(&DataKey::Agent(agent.clone()), &false);
+        env.storage().instance().remove(&DataKey::AgentExpiry(agent));
         bump_instance_ttl(&env);
     }
 
@@ -86,10 +114,7 @@ impl StellarSentinel {
     }
 
     pub fn is_agent(env: Env, agent: Address) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey::Agent(agent))
-            .unwrap_or(false)
+        agent_is_authorized(&env, &agent)
     }
 
     /// Called by an authorized agent when it flags a transaction/address as
@@ -97,12 +122,7 @@ impl StellarSentinel {
     /// the stable `flagged` event and records the latest flag for the subject.
     pub fn flag_anomaly(env: Env, agent: Address, subject: Address, score: u32) {
         agent.require_auth();
-        let is_agent: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::Agent(agent.clone()))
-            .unwrap_or(false);
-        if !is_agent {
+        if !agent_is_authorized(&env, &agent) {
             panic!("not an authorized agent");
         }
         if score > MAX_SCORE {
@@ -169,6 +189,24 @@ fn require_admin(env: &Env, admin: &Address) {
     if stored_admin != *admin {
         panic!("unauthorized");
     }
+}
+
+fn agent_is_authorized(env: &Env, agent: &Address) -> bool {
+    let authorized: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Agent(agent.clone()))
+        .unwrap_or(false);
+    if !authorized {
+        return false;
+    }
+    let expiry: Option<u32> = env
+        .storage()
+        .instance()
+        .get(&DataKey::AgentExpiry(agent.clone()));
+    expiry
+        .map(|expires_at| env.ledger().sequence() < expires_at)
+        .unwrap_or(true)
 }
 
 fn bump_instance_ttl(env: &Env) {

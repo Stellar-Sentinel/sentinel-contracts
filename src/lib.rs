@@ -7,6 +7,7 @@ pub enum DataKey {
     Admin,
     Agent(Address),
     RiskThreshold,
+    Paused,
     LatestFlag(Address),
     // Append registry storage to preserve existing storage-key encoding.
     AgentRegistry,
@@ -63,6 +64,7 @@ impl StellarSentinel {
             .set(&DataKey::RiskThreshold, &default_threshold);
         env.storage().instance().set(&DataKey::AgentCount, &0_u32);
         env.storage().instance().set(&DataKey::AgentCapacity, &HARD_AGENT_CAPACITY);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
@@ -85,7 +87,7 @@ impl StellarSentinel {
     /// is not implemented yet — every authorized agent currently has full
     /// flagging rights. See CONTRIBUTING for the open issue.
     pub fn authorize_agent(env: Env, admin: Address, agent: Address) {
-admin.require_auth();
+        admin.require_auth();
         require_admin(&env, &admin);
         let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
         if !authorized {
@@ -101,7 +103,7 @@ admin.require_auth();
 
     /// Admin-only: revoke an agent's ability to submit risk flags.
     pub fn revoke_agent(env: Env, admin: Address, agent: Address) {
-admin.require_auth();
+        admin.require_auth();
         require_admin(&env, &admin);
         let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
         if authorized {
@@ -116,8 +118,7 @@ admin.require_auth();
 
     /// Admin-only: choose an operational limit up to the hard maximum.
     pub fn set_agent_capacity(env: Env, admin: Address, capacity: u32) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        admin.require_auth(); require_admin(&env, &admin);
         if capacity > HARD_AGENT_CAPACITY { panic!("agent capacity exceeds hard maximum"); }
         let count: u32 = env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration");
         if capacity < count { panic!("agent capacity cannot be below active count"); }
@@ -127,8 +128,7 @@ admin.require_auth();
 
     /// Admin-only one-time migration for already deployed instances.
     pub fn migrate_agent_capacity(env: Env, admin: Address, active_count: u32, capacity: u32) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        admin.require_auth(); require_admin(&env, &admin);
         if env.storage().instance().has(&DataKey::AgentCount) || env.storage().instance().has(&DataKey::AgentCapacity) {
             panic!("agent capacity already initialized");
         }
@@ -143,7 +143,6 @@ admin.require_auth();
     pub fn get_agent_capacity(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::AgentCapacity).expect("agent capacity requires migration")
     }
-
     pub fn get_agent_count(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::AgentCount).expect("agent capacity requires migration")
     }
@@ -174,6 +173,30 @@ admin.require_auth();
         bump_instance_ttl(&env);
     }
 
+    /// Admin-only: stop agent flag submissions.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance_ttl(&env);
+    }
+
+    /// Admin-only: resume agent flag submissions.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance_ttl(&env);
+    }
+
+    /// Report whether new flag submissions are currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     pub fn is_agent(env: Env, agent: Address) -> bool {
         let authorized = env.storage()
             .instance()
@@ -187,6 +210,14 @@ admin.require_auth();
     /// anomalous. Scores below the configured threshold are rejected. Emits
     /// the stable `flagged` event and records the latest flag for the subject.
     pub fn flag_anomaly(env: Env, agent: Address, subject: Address, score: u32) {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            panic!("contract is paused");
+        }
         agent.require_auth();
         let is_agent: bool = env
             .storage()

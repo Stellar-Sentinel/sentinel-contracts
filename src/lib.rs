@@ -51,6 +51,15 @@ impl StellarSentinel {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
     }
 
+    /// Transfer administration only after both current and proposed admins approve.
+    pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
+        current_admin.require_auth();
+        require_admin(&env, &current_admin);
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        bump_instance_ttl(&env);
+    }
+
     /// Admin-only: authorize an address to act as a monitoring agent.
     /// TODO(#issue): role separation between "monitor" and "responder" agents
     /// is not implemented yet — every authorized agent currently has full

@@ -158,6 +158,22 @@ impl StellarSentinel {
         bump_instance_ttl(&env);
         threshold
     }
+
+    /// Report whether a score is within the contract range and meets policy.
+    /// This query is advisory; flag_anomaly repeats the checks on-chain.
+    pub fn is_score_accepted(env: Env, score: u32) -> bool {
+        let threshold: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold);
+        match threshold {
+            Some(threshold) => {
+                bump_instance_ttl(&env);
+                score <= MAX_SCORE && score >= threshold
+            }
+            None => false,
+        }
+    }
 }
 
 fn require_admin(env: &Env, admin: &Address) {

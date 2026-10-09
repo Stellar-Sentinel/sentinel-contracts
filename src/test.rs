@@ -153,3 +153,38 @@ fn agent_cannot_submit_score_above_100() {
     client.authorize_agent(&admin, &agent);
     client.flag_anomaly(&agent, &subject, &101);
 }
+
+#[test]
+fn agent_registry_is_idempotent_and_removes_revoked_agents() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.authorize_agent(&admin, &agent);
+    let agents = client.get_agents(&admin);
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents.get(0), Some(agent.clone()));
+
+    client.revoke_agent(&admin, &agent);
+    assert_eq!(client.get_agents(&admin).len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "agent registry is full")]
+fn agent_registry_rejects_more_than_its_maximum() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &70);
+
+    for _ in 0..=MAX_AUTHORIZED_AGENTS {
+        client.authorize_agent(&admin, &Address::generate(&env));
+    }
+}

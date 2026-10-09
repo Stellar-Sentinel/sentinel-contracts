@@ -5,6 +5,10 @@
 
 Soroban contract for administrator-managed monitoring agents, a configurable 0–100 score threshold, and account flags. It publishes `flagged` events and stores the latest flag for each subject. It does not store full history; event indexing is needed for that.
 
+## Agent registry
+
+`get_agents` returns the administrator-authenticated list of active legacy agents. The registry is capped at 128 unique addresses; repeated authorization is idempotent, and revocation removes the address so capacity is released. Existing agent mapping storage remains intact, and the new registry key is appended to the storage-key enum.
+
 ## Architecture
 
 ```mermaid

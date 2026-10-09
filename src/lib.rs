@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 // Storage keys
 #[contracttype]
@@ -8,6 +8,8 @@ pub enum DataKey {
     Agent(Address),
     RiskThreshold,
     LatestFlag(Address),
+    // Append registry storage to preserve existing storage-key encoding.
+    AgentRegistry,
 }
 
 /// Latest flag recorded for a subject. Soroban events remain the append-only
@@ -27,6 +29,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
 const PERSISTENT_TTL_BUMP: u32 = 100_000;
+const MAX_AUTHORIZED_AGENTS: u32 = 128;
 
 #[contract]
 pub struct StellarSentinel;
@@ -58,6 +61,7 @@ impl StellarSentinel {
     pub fn authorize_agent(env: Env, admin: Address, agent: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        add_agent_to_registry(&env, &agent);
         env.storage().instance().set(&DataKey::Agent(agent), &true);
         bump_instance_ttl(&env);
     }
@@ -68,8 +72,22 @@ impl StellarSentinel {
         require_admin(&env, &admin);
         env.storage()
             .instance()
-            .set(&DataKey::Agent(agent), &false);
+            .set(&DataKey::Agent(agent.clone()), &false);
+        remove_agent_from_registry(&env, &agent);
         bump_instance_ttl(&env);
+    }
+
+    /// Return the active agent registry to the administrator.
+    pub fn get_agents(env: Env, admin: Address) -> Vec<Address> {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let agents = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentRegistry)
+            .unwrap_or(Vec::new(&env));
+        bump_instance_ttl(&env);
+        agents
     }
 
     /// Admin-only: update the accepted risk score threshold (0 through 100).
@@ -158,6 +176,41 @@ impl StellarSentinel {
         bump_instance_ttl(&env);
         threshold
     }
+}
+
+fn add_agent_to_registry(env: &Env, agent: &Address) {
+    let mut agents: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::AgentRegistry)
+        .unwrap_or(Vec::new(env));
+    if agents.contains(agent) {
+        return;
+    }
+    if agents.len() >= MAX_AUTHORIZED_AGENTS {
+        panic!("agent registry is full");
+    }
+    agents.push_back(agent.clone());
+    env.storage()
+        .instance()
+        .set(&DataKey::AgentRegistry, &agents);
+}
+
+fn remove_agent_from_registry(env: &Env, agent: &Address) {
+    let agents: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::AgentRegistry)
+        .unwrap_or(Vec::new(env));
+    let mut remaining = Vec::new(env);
+    for registered in agents.iter() {
+        if registered != agent.clone() {
+            remaining.push_back(registered);
+        }
+    }
+    env.storage()
+        .instance()
+        .set(&DataKey::AgentRegistry, &remaining);
 }
 
 fn require_admin(env: &Env, admin: &Address) {

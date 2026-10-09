@@ -1,6 +1,6 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::IntoVal;
 use soroban_sdk::{vec, BytesN, Symbol, TryFromVal};
 
@@ -369,7 +369,7 @@ fn agent_registry_is_idempotent_and_removes_revoked_agents() {
 }
 
 #[test]
-#[should_panic(expected = "agent registry is full")]
+#[should_panic(expected = "agent capacity reached")]
 fn agent_registry_rejects_more_than_its_maximum() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());
@@ -378,7 +378,7 @@ fn agent_registry_rejects_more_than_its_maximum() {
     env.mock_all_auths();
     client.initialize(&admin, &70);
 
-    for _ in 0..=MAX_AUTHORIZED_AGENTS {
+    for _ in 0..=HARD_AGENT_CAPACITY {
         client.authorize_agent(&admin, &Address::generate(&env));
     }
 }
@@ -507,4 +507,150 @@ fn versioned_flag_enforces_agent_and_score_checks() {
     assert!(client.try_flag_anomaly_v2(&agent, &subject, &101, &digest).is_err());
     assert_eq!(client.get_latest_flag(&subject), None);
     assert!(env.events().all().is_empty());
+}
+
+#[test]
+fn monitor_and_responder_authority_are_separate_and_revocable() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let monitor = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_monitor(&admin, &monitor);
+    assert!(client.is_monitor(&monitor));
+    assert!(!client.is_responder(&monitor));
+    assert!(client.try_flag_anomaly(&monitor, &subject, &80).is_err());
+
+    client.authorize_responder(&admin, &monitor);
+    assert!(client.is_responder(&monitor));
+    client.flag_anomaly(&monitor, &subject, &80);
+    client.revoke_responder(&admin, &monitor);
+    assert!(client.is_monitor(&monitor));
+    assert!(!client.is_responder(&monitor));
+    client.revoke_monitor(&admin, &monitor);
+    assert!(!client.is_agent(&monitor));
+}
+
+#[test]
+fn agent_capacity_and_self_revoke_keep_registry_consistent() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let second = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.set_agent_capacity(&admin, &1);
+    assert_eq!(client.get_agent_capacity(), 1);
+    client.authorize_agent(&admin, &agent);
+    assert_eq!(client.get_agent_count(), 1);
+    assert!(client.try_authorize_agent(&admin, &second).is_err());
+
+    client.revoke_self(&agent);
+    assert!(!client.is_agent(&agent));
+    assert_eq!(client.get_agent_count(), 0);
+    assert_eq!(client.get_agents(&admin).len(), 0);
+    client.authorize_agent(&admin, &second);
+    assert_eq!(client.get_agent_count(), 1);
+}
+
+#[test]
+fn expiring_agent_grants_stop_working_at_the_expiry_ledger() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    let expiry = env.ledger().sequence() + 10;
+    client.authorize_agent_until(&admin, &agent, &expiry);
+    assert!(client.is_responder(&agent));
+    env.ledger().set_sequence_number(expiry);
+    assert!(!client.is_agent(&agent));
+    assert!(client.try_flag_anomaly(&agent, &subject, &80).is_err());
+    assert_eq!(client.get_agent_count(), 0);
+    let replacement = Address::generate(&env);
+    client.authorize_agent(&admin, &replacement);
+    assert_eq!(client.get_agent_count(), 1);
+}
+
+#[test]
+fn admin_can_clear_latest_flag_without_removing_event_history() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.flag_anomaly(&agent, &subject, &80);
+    assert_eq!(env.events().all().len(), 1);
+    assert!(client.get_latest_flag(&subject).is_some());
+    client.clear_latest_flag(&admin, &subject);
+    assert_eq!(client.get_latest_flag(&subject), None);
+    assert!(env.events().all().is_empty());
+}
+
+#[test]
+fn admin_and_guardian_pauses_gate_all_flag_submission_methods() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let digest = BytesN::from_array(&env, &[4; 32]);
+    let submissions = vec![&env, FlagSubmission { subject: subject.clone(), score: 80 }];
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.set_emergency_guardian(&admin, &guardian);
+    client.guardian_pause(&guardian);
+    assert!(client.is_guardian_paused());
+    assert!(client.try_flag_anomaly(&agent, &subject, &80).is_err());
+    assert!(client.try_flag_anomaly_v2(&agent, &subject, &80, &digest).is_err());
+    assert!(client.try_flag_anomalies(&agent, &submissions).is_err());
+
+    client.resume_from_guardian_pause(&admin);
+    assert!(!client.is_guardian_paused());
+    client.set_paused(&admin, &true);
+    assert!(client.try_flag_anomaly(&agent, &subject, &80).is_err());
+    client.set_paused(&admin, &false);
+    client.flag_anomaly(&agent, &subject, &80);
+}
+
+#[test]
+fn config_snapshot_storage_version_and_initialization_event_are_available() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+
+    assert_eq!(client.get_storage_version(), 0);
+    assert_eq!(client.get_contract_config(), None);
+    client.initialize(&admin, &75);
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    let (_, topics, value) = events.get(0).unwrap();
+    assert_eq!(Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(), symbol_short!("init"));
+    assert_eq!(u32::try_from_val(&env, &value).unwrap(), 75);
+    assert_eq!(client.get_storage_version(), STORAGE_VERSION);
+    let config = client.get_contract_config().unwrap();
+    assert_eq!(config.admin, admin);
+    assert_eq!(config.threshold, 75);
 }

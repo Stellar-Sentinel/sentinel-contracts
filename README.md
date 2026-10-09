@@ -3,11 +3,11 @@
 [![CI](https://github.com/Stellar-Sentinel/sentinel-contracts/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Stellar-Sentinel/sentinel-contracts/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Soroban contract for administrator-managed monitoring agents, a configurable 0–100 score threshold, and account flags. It publishes `flagged` events and stores the latest flag for each subject. It does not store full history; event indexing is needed for that.
+Soroban contract for administrator-managed monitoring and response roles, a configurable 0–100 score threshold, and account flags. It publishes flag and administrative events and stores the latest flag for each subject. It does not store full history; event indexing is needed for that.
 
 ## Agent registry
 
-`get_agents` returns the administrator-authenticated list of active legacy agents. The registry is capped at 128 unique addresses; repeated authorization is idempotent, and revocation removes the address so capacity is released. Existing agent mapping storage remains intact, and the new registry key is appended to the storage-key enum.
+`get_agents` returns the administrator-authenticated list of active agents. The registry has a configurable capacity up to 128 addresses; repeated authorization is idempotent, and revocation or grant expiry releases capacity. Legacy `authorize_agent` grants responder access. Explicit monitor and responder roles can be managed independently. Expiring grants are supported for up to 100,000 ledgers.
 
 ## Architecture
 
@@ -25,15 +25,18 @@ The backend reads events and does not sign or submit transactions. The contract 
 
 ### Configuration events
 
-Admin changes publish typed Soroban events for off-chain audit consumers:
+Initialization and administrative changes publish typed Soroban events for off-chain audit consumers:
 
 | Topic 0 | Additional topics | Value | Meaning |
 | --- | --- | --- | --- |
 | `agent_add` | administrator address, affected agent address | `true` | The agent was authorized. |
 | `agent_del` | administrator address, affected agent address | `false` | The agent was revoked. |
 | `threshold` | administrator address | `(previous_threshold, new_threshold)` as two `u32` values | The risk threshold changed. |
+| `init` | administrator address | `u32` threshold | The contract was initialized. |
+| `pause` | administrator address | `bool` | New flag submissions were paused or resumed. |
+| `gpause` / `gunpause` | guardian or administrator address | `bool` | Guardian pause state changed. |
 
-The existing `flagged` event remains unchanged: its topics are `flagged`, agent address, and subject address, and its value is the `u32` score. The backend event reader currently filters only for `flagged`; decoding these configuration events is a separate follow-up. A failed or unauthorized call aborts before publishing an event.
+The existing `flagged` event remains unchanged: its topics are `flagged`, agent address, and subject address, and its value is the `u32` score. The backend also decodes `flaggedv2` reports. Administrative event indexing is not currently shown in the dashboard. A failed or unauthorized call aborts before publishing an event.
 
 ## Testnet deployment
 
@@ -111,26 +114,32 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 ## Contract interface
 
 - `get_interface_version()` — return the interface generation; increment it for incompatible method or event changes.
+- `get_contract_config()` — read the administrator and threshold together; returns `None` before initialization.
+- `get_storage_version()` / `migrate_storage_version(admin)` — inspect and backfill the instance storage schema version.
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
 - `is_initialized()` — check configuration state without causing an uninitialized-state panic.
 - `get_admin()` — read the configured administrator after initialization.
 - `transfer_admin(current_admin, new_admin)` — require both addresses to authorize an administrator handover.
-- `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage flagging agents. `authorize_agents` / `revoke_agents` support bounded batches of up to 16 addresses; repeated entries are idempotent.
+- `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage legacy responder grants. `authorize_monitor` / `authorize_responder` and matching revoke methods manage roles independently. Batch methods handle up to 16 addresses; `revoke_self(agent)` lets an agent remove its own grant.
+- `authorize_agent_until(admin, agent, expires_at_ledger)` — grant responder access through a ledger-bounded expiry.
+- `set_agent_capacity(admin, capacity)` / `get_agent_capacity()` / `get_agent_count()` / `get_agents(admin)` — manage and inspect the capped agent registry. `migrate_agent_capacity` supports existing instances.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold. Repeating the current value refreshes instance TTL without rewriting state or emitting a duplicate audit event.
 - `is_score_accepted(score)` — preflight the score range and active threshold; `flag_anomaly` remains authoritative.
-- `pause(admin)` / `unpause(admin)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
+- `pause(admin)` / `unpause(admin)` / `set_paused(admin, paused)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
+- `set_emergency_guardian(admin, guardian)` / `guardian_pause(guardian)` / `resume_from_guardian_pause(admin)` — provide a guardian with pause-only emergency authority.
 - `is_agent(agent)` — check agent authorization and extend the active contract instance TTL.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
 - `flag_anomaly_v2(agent, subject, score, report_digest)` — apply the same validation and record update, then publish a versioned event with a fixed 32-byte report digest.
 - `flag_anomalies(agent, submissions)` — submit 1–16 subject/score entries in one transaction, validating the full batch before writes.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
+- `clear_latest_flag(admin, subject)` — clear a subject's latest record; previously published events remain available for indexing.
 
-Successful `authorize_agent`, `revoke_agent`, and `set_threshold` calls also publish the corresponding configuration events described above.
+Successful initialization and state-changing administrative calls publish the corresponding events described above. Read methods do not extend the TTL of each grant; expired grants are removed from the active registry when agent counts or lists are refreshed.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.
 
-Pausing is an emergency control for new `flag_anomaly` submissions. It does not erase existing flags or block read methods, and new deployments start unpaused. Only the administrator can pause or resume submissions.
+Pausing is an emergency control for all flag submission methods. It does not erase existing flags or block read methods, and new deployments start unpaused. The administrator controls the standard pause; an optional guardian can pause, while only the administrator can resume a guardian pause.
 
 For an administrator handover, prepare one `transfer_admin` invocation authorized by both the current admin and the proposed admin. The operation fails without either authorization, and the proposed address becomes the sole administrator after success. Verify the new administrator can call an admin-only method before removing access to the old signing setup.
 
-`flag_anomaly_v2` preserves the original entry point and `flagged` event. It publishes `flaggedv2` with topics `(flaggedv2, agent, subject, report_digest)` and the `u32` score as event data. The digest is exactly 32 bytes; off-chain producers must agree on canonical report bytes before hashing (for example, SHA-256). Raw reports and the digest are not added to `FlagRecord`; `get_latest_flag` continues returning only the latest agent, score, ledger, and timestamp. The backend and dashboard still need to add a `flaggedv2` decoder to consume these events.
+`flag_anomaly_v2` preserves the original entry point and `flagged` event. It publishes `flaggedv2` with topics `(flaggedv2, agent, subject, report_digest)` and the `u32` score as event data. The digest is exactly 32 bytes; off-chain producers must agree on canonical report bytes before hashing (for example, SHA-256). Raw reports and the digest are not added to `FlagRecord`; `get_latest_flag` continues returning only the latest agent, score, ledger, and timestamp. The backend decodes these events for its dashboard feed.

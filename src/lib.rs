@@ -78,16 +78,12 @@ impl StellarSentinel {
 
     /// Return the configured contract administrator.
     pub fn get_admin(env: Env) -> Address {
-        let admin = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
+        let admin = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         bump_instance_ttl(&env);
         admin
     }
 
-    /// Transfer administration in one operation accepted by both addresses.
+    /// Transfer administration only after both current and proposed admins approve.
     pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
         current_admin.require_auth();
         require_admin(&env, &current_admin);

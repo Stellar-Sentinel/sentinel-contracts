@@ -34,19 +34,29 @@ pub struct FlagSubmission {
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
+const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
+const AGENT_DEL_EVENT: Symbol = symbol_short!("agent_del");
+const THRESHOLD_EVENT: Symbol = symbol_short!("threshold");
 const MAX_SCORE: u32 = 100;
+const INTERFACE_VERSION: u32 = 1;
 const MAX_FLAG_BATCH: u32 = 16;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
 const PERSISTENT_TTL_BUMP: u32 = 100_000;
 const MAX_AUTHORIZED_AGENTS: u32 = 128;
+const MAX_AGENT_BATCH: u32 = 16;
 
 #[contract]
 pub struct StellarSentinel;
 
 #[contractimpl]
 impl StellarSentinel {
+    /// Return the external contract interface generation.
+    pub fn get_interface_version() -> u32 {
+        INTERFACE_VERSION
+    }
+
     /// One-time setup. Sets the contract admin and a default risk threshold.
     pub fn initialize(env: Env, admin: Address, default_threshold: u32) {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -64,6 +74,17 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    /// Return the configured contract administrator.
+    pub fn get_admin(env: Env) -> Address {
+        let admin = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        bump_instance_ttl(&env);
+        admin
     }
 
     /// Transfer administration in one operation accepted by both addresses.
@@ -85,8 +106,27 @@ impl StellarSentinel {
     pub fn authorize_agent(env: Env, admin: Address, agent: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Agent(agent.clone()), &true);
         add_agent_to_registry(&env, &agent);
-        env.storage().instance().set(&DataKey::Agent(agent), &true);
+        env.storage().instance().set(&DataKey::Agent(agent.clone()), &true);
+        bump_instance_ttl(&env);
+        env.events().publish((AGENT_ADD_EVENT, admin, agent), true);
+    }
+
+    /// Admin-only: authorize up to MAX_AGENT_BATCH addresses in one call.
+    /// Repeated addresses are idempotent, matching authorize_agent.
+    pub fn authorize_agents(env: Env, admin: Address, agents: Vec<Address>) {
+        admin.require_auth(); require_admin(&env, &admin);
+        if agents.len() > MAX_AGENT_BATCH { panic!("agent batch exceeds maximum"); }
+        for agent in agents {
+            let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
+            if !authorized {
+                add_agent_to_registry(&env, &agent);
+                env.storage().instance().set(&DataKey::Agent(agent), &true);
+            }
+        }
         bump_instance_ttl(&env);
     }
 
@@ -98,6 +138,22 @@ impl StellarSentinel {
             .instance()
             .set(&DataKey::Agent(agent.clone()), &false);
         remove_agent_from_registry(&env, &agent);
+        bump_instance_ttl(&env);
+        env.events().publish((AGENT_DEL_EVENT, admin, agent), false);
+    }
+
+    /// Admin-only: revoke up to MAX_AGENT_BATCH addresses in one call.
+    /// Repeated or already-revoked addresses are idempotent.
+    pub fn revoke_agents(env: Env, admin: Address, agents: Vec<Address>) {
+        admin.require_auth(); require_admin(&env, &admin);
+        if agents.len() > MAX_AGENT_BATCH { panic!("agent batch exceeds maximum"); }
+        for agent in agents {
+            let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
+            if authorized {
+                env.storage().instance().set(&DataKey::Agent(agent.clone()), &false);
+                remove_agent_from_registry(&env, &agent);
+            }
+        }
         bump_instance_ttl(&env);
     }
 
@@ -121,10 +177,17 @@ impl StellarSentinel {
         if threshold > MAX_SCORE {
             panic!("threshold must be between 0 and 100");
         }
+        let previous: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold)
+            .expect("not initialized");
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &threshold);
         bump_instance_ttl(&env);
+        env.events()
+            .publish((THRESHOLD_EVENT, admin), (previous, threshold));
     }
 
     /// Admin-only: stop agent flag submissions.
@@ -200,29 +263,28 @@ impl StellarSentinel {
             timestamp: env.ledger().timestamp(),
         };
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_TTL_THRESHOLD,
-            PERSISTENT_TTL_BUMP,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
         bump_instance_ttl(&env);
-        env.events()
-            .publish((FLAG_EVENT, agent, subject), score);
+        env.events().publish((FLAG_EVENT, agent, subject), score);
     }
 
     /// Submit a flag linked to an off-chain report digest without storing report contents.
-    pub fn flag_anomaly_v2(
-        env: Env,
-        agent: Address,
-        subject: Address,
-        score: u32,
-        report_digest: BytesN<32>,
-    ) {
+    pub fn flag_anomaly_v2(env: Env, agent: Address, subject: Address, score: u32, report_digest: BytesN<32>) {
+        if env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false) { panic!("contract is paused"); }
+        if env.storage().instance().get::<_, bool>(&DataKey::GuardianPaused).unwrap_or(false) { panic!("emergency guardian paused contract"); }
         agent.require_auth();
-        validate_flag(&env, &agent, score);
-        save_latest_flag(&env, &agent, &subject, score);
-        env.events()
-            .publish((FLAGGED_V2_EVENT, agent, subject, report_digest), score);
+        if !has_responder_role(&env, &agent) { panic!("not an authorized agent"); }
+        if score > MAX_SCORE { panic!("score must be between 0 and 100"); }
+        let threshold: u32 = env.storage().instance().get(&DataKey::RiskThreshold).expect("not initialized");
+        if score < threshold { panic!("score below risk threshold"); }
+        let key = DataKey::LatestFlag(subject.clone());
+        let record = FlagRecord { agent: agent.clone(), score, ledger: env.ledger().sequence(), timestamp: env.ledger().timestamp() };
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+        bump_instance_ttl(&env);
+        env.events().publish((FLAGGED_V2_EVENT, agent, subject, report_digest), score);
     }
 
     /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.
@@ -291,12 +353,29 @@ impl StellarSentinel {
     }
 
     pub fn get_threshold(env: Env) -> u32 {
-        let threshold = env.storage()
+        let threshold = env
+            .storage()
             .instance()
             .get(&DataKey::RiskThreshold)
             .unwrap_or(0);
         bump_instance_ttl(&env);
         threshold
+    }
+
+    /// Report whether a score is within the contract range and meets policy.
+    /// This query is advisory; flag_anomaly repeats the checks on-chain.
+    pub fn is_score_accepted(env: Env, score: u32) -> bool {
+        let threshold: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold);
+        match threshold {
+            Some(threshold) => {
+                bump_instance_ttl(&env);
+                score <= MAX_SCORE && score >= threshold
+            }
+            None => false,
+        }
     }
 }
 
@@ -333,43 +412,6 @@ fn remove_agent_from_registry(env: &Env, agent: &Address) {
     env.storage()
         .instance()
         .set(&DataKey::AgentRegistry, &remaining);
-}
-
-fn validate_flag(env: &Env, agent: &Address, score: u32) {
-    let is_agent: bool = env
-        .storage()
-        .instance()
-        .get(&DataKey::Agent(agent.clone()))
-        .unwrap_or(false);
-    if !is_agent {
-        panic!("not an authorized agent");
-    }
-    if score > MAX_SCORE {
-        panic!("score must be between 0 and 100");
-    }
-    let threshold: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::RiskThreshold)
-        .expect("not initialized");
-    if score < threshold {
-        panic!("score below risk threshold");
-    }
-}
-
-fn save_latest_flag(env: &Env, agent: &Address, subject: &Address, score: u32) {
-    let key = DataKey::LatestFlag(subject.clone());
-    let record = FlagRecord {
-        agent: agent.clone(),
-        score,
-        ledger: env.ledger().sequence(),
-        timestamp: env.ledger().timestamp(),
-    };
-    env.storage().persistent().set(&key, &record);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
-    bump_instance_ttl(env);
 }
 
 fn require_admin(env: &Env, admin: &Address) {

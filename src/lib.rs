@@ -180,6 +180,8 @@ impl StellarSentinel {
         if threshold > MAX_SCORE {
             panic!("threshold must be between 0 and 100");
         }
+        let current: u32 = env.storage().instance().get(&DataKey::RiskThreshold).expect("not initialized");
+        if current == threshold { bump_instance_ttl(&env); return; }
         let previous: u32 = env
             .storage()
             .instance()

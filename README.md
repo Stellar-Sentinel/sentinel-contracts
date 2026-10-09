@@ -94,6 +94,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 
 ## Contract interface
 
+- `get_interface_version()` — return the interface generation; increment it for incompatible method or event changes.
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
 - `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage flagging agents.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold.

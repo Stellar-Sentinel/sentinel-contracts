@@ -23,6 +23,7 @@ pub struct FlagRecord {
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const MAX_SCORE: u32 = 100;
+const INTERFACE_VERSION: u32 = 1;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
@@ -33,6 +34,11 @@ pub struct StellarSentinel;
 
 #[contractimpl]
 impl StellarSentinel {
+    /// Return the external contract interface generation.
+    pub fn get_interface_version() -> u32 {
+        INTERFACE_VERSION
+    }
+
     /// One-time setup. Sets the contract admin and a default risk threshold.
     pub fn initialize(env: Env, admin: Address, default_threshold: u32) {
         if env.storage().instance().has(&DataKey::Admin) {

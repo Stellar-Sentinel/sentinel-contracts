@@ -7,6 +7,7 @@ pub enum DataKey {
     Admin,
     Agent(Address),
     RiskThreshold,
+    Paused,
     LatestFlag(Address),
     // Append registry storage to preserve existing storage-key encoding.
     AgentRegistry,
@@ -60,8 +61,8 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &default_threshold);
-        env.events()
-            .publish((INIT_EVENT, admin.clone()), default_threshold);
+        env.events().publish((INIT_EVENT, admin.clone()), default_threshold);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
@@ -125,9 +126,32 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &threshold);
-        env.events()
-            .publish((THRESHOLD_EVENT, admin.clone()), threshold);
+        env.events().publish((THRESHOLD_EVENT, admin.clone()), threshold);
         bump_instance_ttl(&env);
+    }
+
+    /// Admin-only: stop agent flag submissions.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance_ttl(&env);
+    }
+
+    /// Admin-only: resume agent flag submissions.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance_ttl(&env);
+    }
+
+    /// Report whether new flag submissions are currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn is_agent(env: Env, agent: Address) -> bool {
@@ -143,6 +167,14 @@ impl StellarSentinel {
     /// anomalous. Scores below the configured threshold are rejected. Emits
     /// the stable `flagged` event and records the latest flag for the subject.
     pub fn flag_anomaly(env: Env, agent: Address, subject: Address, score: u32) {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            panic!("contract is paused");
+        }
         agent.require_auth();
         let is_agent: bool = env
             .storage()

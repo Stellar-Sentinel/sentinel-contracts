@@ -1,9 +1,8 @@
 #![cfg(test)]
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
-use soroban_sdk::{vec, Symbol, TryFromVal};
 use soroban_sdk::IntoVal;
-use soroban_sdk::{BytesN, Symbol, TryFromVal};
+use soroban_sdk::{vec, BytesN, Symbol, TryFromVal};
 
 #[test]
 fn test_initialize_and_threshold() {

@@ -277,17 +277,45 @@ impl StellarSentinel {
 
     /// Submit a flag linked to an off-chain report digest without storing report contents.
     pub fn flag_anomaly_v2(env: Env, agent: Address, subject: Address, score: u32, report_digest: BytesN<32>) {
-        if env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false) { panic!("contract is paused"); }
-        if env.storage().instance().get::<_, bool>(&DataKey::GuardianPaused).unwrap_or(false) { panic!("emergency guardian paused contract"); }
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            panic!("contract is paused");
+        }
         agent.require_auth();
-        if !has_responder_role(&env, &agent) { panic!("not an authorized agent"); }
-        if score > MAX_SCORE { panic!("score must be between 0 and 100"); }
-        let threshold: u32 = env.storage().instance().get(&DataKey::RiskThreshold).expect("not initialized");
-        if score < threshold { panic!("score below risk threshold"); }
+        let is_agent: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Agent(agent.clone()))
+            .unwrap_or(false);
+        if !is_agent {
+            panic!("not an authorized agent");
+        }
+        if score > MAX_SCORE {
+            panic!("score must be between 0 and 100");
+        }
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold)
+            .expect("not initialized");
+        if score < threshold {
+            panic!("score below risk threshold");
+        }
         let key = DataKey::LatestFlag(subject.clone());
-        let record = FlagRecord { agent: agent.clone(), score, ledger: env.ledger().sequence(), timestamp: env.ledger().timestamp() };
+        let record = FlagRecord {
+            agent: agent.clone(),
+            score,
+            ledger: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+        };
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
         bump_instance_ttl(&env);
         env.events().publish((FLAGGED_V2_EVENT, agent, subject, report_digest), score);
     }

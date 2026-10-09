@@ -33,6 +33,15 @@ pub struct StellarSentinel;
 
 #[contractimpl]
 impl StellarSentinel {
+    /// Return whether this contract instance has completed initialization.
+    pub fn is_initialized(env: Env) -> bool {
+        let initialized = env.storage().instance().has(&DataKey::Admin);
+        if initialized {
+            bump_instance_ttl(&env);
+        }
+        initialized
+    }
+
     /// One-time setup. Sets the contract admin and a default risk threshold.
     pub fn initialize(env: Env, admin: Address, default_threshold: u32) {
         if env.storage().instance().has(&DataKey::Admin) {

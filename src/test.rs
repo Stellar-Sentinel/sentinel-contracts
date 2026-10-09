@@ -153,3 +153,81 @@ fn agent_cannot_submit_score_above_100() {
     client.authorize_agent(&admin, &agent);
     client.flag_anomaly(&agent, &subject, &101);
 }
+
+#[test]
+fn agent_capacity_counts_only_state_transitions_and_releases_revoked_slots() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    assert_eq!(client.get_agent_capacity(), HARD_AGENT_CAPACITY);
+    client.set_agent_capacity(&admin, &1);
+    client.authorize_agent(&admin, &first);
+    client.authorize_agent(&admin, &first);
+    assert_eq!(client.get_agent_count(), 1);
+    client.revoke_agent(&admin, &first);
+    client.revoke_agent(&admin, &first);
+    assert_eq!(client.get_agent_count(), 0);
+    client.authorize_agent(&admin, &second);
+    assert_eq!(client.get_agent_count(), 1);
+}
+
+#[test]
+#[should_panic(expected = "agent capacity reached")]
+fn agent_capacity_rejects_new_unique_agents_at_the_limit() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.set_agent_capacity(&admin, &1);
+    client.authorize_agent(&admin, &first);
+    client.authorize_agent(&admin, &second);
+}
+
+#[test]
+#[should_panic(expected = "agent capacity cannot be below active count")]
+fn agent_capacity_cannot_be_lowered_below_active_count() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.set_agent_capacity(&admin, &0);
+}
+
+#[test]
+fn legacy_instance_can_initialize_agent_capacity_once() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let existing = Address::generate(&env);
+    let next = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &existing);
+    env.as_contract(&contract_id, || {
+        env.storage().instance().remove(&DataKey::AgentCount);
+        env.storage().instance().remove(&DataKey::AgentCapacity);
+    });
+    client.migrate_agent_capacity(&admin, &1, &2);
+    client.authorize_agent(&admin, &next);
+
+    assert_eq!(client.get_agent_count(), 2);
+    assert_eq!(client.get_agent_capacity(), 2);
+}

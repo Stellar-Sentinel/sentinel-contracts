@@ -5,6 +5,8 @@
 
 Soroban contract for administrator-managed monitoring agents, a configurable 0–100 score threshold, and account flags. It publishes `flagged` events and stores the latest flag for each subject. It does not store full history; event indexing is needed for that.
 
+The administrator can set the active agent capacity up to a hard maximum of 128. New deployments start at 128 with zero agents. For an upgraded instance without capacity state, call `migrate_agent_capacity` once with the verified active count and desired capacity before authorizing or revoking agents. Repeated grants do not consume slots, and revocation releases a slot.
+
 ## Architecture
 
 ```mermaid

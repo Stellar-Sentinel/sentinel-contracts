@@ -8,6 +8,8 @@ pub enum DataKey {
     Agent(Address),
     RiskThreshold,
     LatestFlag(Address),
+    AgentCount,
+    AgentCapacity,
 }
 
 /// Latest flag recorded for a subject. Soroban events remain the append-only
@@ -27,6 +29,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
 const PERSISTENT_TTL_THRESHOLD: u32 = 10_000;
 const PERSISTENT_TTL_BUMP: u32 = 100_000;
+const HARD_AGENT_CAPACITY: u32 = 128;
 
 #[contract]
 pub struct StellarSentinel;
@@ -46,6 +49,10 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &default_threshold);
+        env.storage().instance().set(&DataKey::AgentCount, &0_u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::AgentCapacity, &HARD_AGENT_CAPACITY);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
@@ -58,6 +65,31 @@ impl StellarSentinel {
     pub fn authorize_agent(env: Env, admin: Address, agent: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        let authorized: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Agent(agent.clone()))
+            .unwrap_or(false);
+        if authorized {
+            bump_instance_ttl(&env);
+            return;
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentCount)
+            .expect("agent capacity requires migration");
+        let capacity: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentCapacity)
+            .expect("agent capacity requires migration");
+        if count >= capacity {
+            panic!("agent capacity reached");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AgentCount, &(count + 1));
         env.storage().instance().set(&DataKey::Agent(agent), &true);
         bump_instance_ttl(&env);
     }
@@ -66,10 +98,89 @@ impl StellarSentinel {
     pub fn revoke_agent(env: Env, admin: Address, agent: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
+        let authorized: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Agent(agent.clone()))
+            .unwrap_or(false);
+        if !authorized {
+            bump_instance_ttl(&env);
+            return;
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentCount)
+            .expect("agent capacity requires migration");
+        if count == 0 {
+            panic!("agent count invariant violated");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AgentCount, &(count - 1));
         env.storage()
             .instance()
             .set(&DataKey::Agent(agent), &false);
         bump_instance_ttl(&env);
+    }
+
+    /// Admin-only: choose an operational limit up to the hard maximum.
+    pub fn set_agent_capacity(env: Env, admin: Address, capacity: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if capacity > HARD_AGENT_CAPACITY {
+            panic!("agent capacity exceeds hard maximum");
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentCount)
+            .expect("agent capacity requires migration");
+        if capacity < count {
+            panic!("agent capacity cannot be below active count");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AgentCapacity, &capacity);
+        bump_instance_ttl(&env);
+    }
+
+    /// Admin-only one-time migration for already deployed instances.
+    pub fn migrate_agent_capacity(env: Env, admin: Address, active_count: u32, capacity: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if env.storage().instance().has(&DataKey::AgentCount)
+            || env.storage().instance().has(&DataKey::AgentCapacity)
+        {
+            panic!("agent capacity already initialized");
+        }
+        if active_count > HARD_AGENT_CAPACITY
+            || capacity > HARD_AGENT_CAPACITY
+            || capacity < active_count
+        {
+            panic!("invalid migrated agent capacity");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AgentCount, &active_count);
+        env.storage()
+            .instance()
+            .set(&DataKey::AgentCapacity, &capacity);
+        bump_instance_ttl(&env);
+    }
+
+    pub fn get_agent_capacity(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AgentCapacity)
+            .expect("agent capacity requires migration")
+    }
+
+    pub fn get_agent_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AgentCount)
+            .expect("agent capacity requires migration")
     }
 
     /// Admin-only: update the accepted risk score threshold (0 through 100).

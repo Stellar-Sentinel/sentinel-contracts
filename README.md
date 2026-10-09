@@ -112,6 +112,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 
 - `get_interface_version()` — return the interface generation; increment it for incompatible method or event changes.
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
+- `is_initialized()` — check configuration state without causing an uninitialized-state panic.
 - `get_admin()` — read the configured administrator after initialization.
 - `transfer_admin(current_admin, new_admin)` — require both addresses to authorize an administrator handover.
 - `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage flagging agents. `authorize_agents` / `revoke_agents` support bounded batches of up to 16 addresses; repeated entries are idempotent.

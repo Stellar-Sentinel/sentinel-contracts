@@ -44,20 +44,20 @@ The current Stellar Sentinel instance is deployed and initialized on the **Stell
 
 | Detail | Value |
 | --- | --- |
-| Contract ID | [`CCZAAZ3FJ7LKZA7E7A6EKQTU2HCNVI3YUVIHKWHSULGZSWAJFS2D2XVX`](https://stellar.expert/explorer/testnet/contract/CCZAAZ3FJ7LKZA7E7A6EKQTU2HCNVI3YUVIHKWHSULGZSWAJFS2D2XVX) |
-| Contract source | [`5b6b5a7`](https://github.com/Stellar-Sentinel/sentinel-contracts/commit/5b6b5a7df1219242579833d0f46f4f215745eca1) |
-| Wasm SHA-256 | `f501250438515ff26e18ebf951cd62de717c711e68d031fb0fad5c9a9b36bd5d` |
+| Contract ID | [`CBVFEUGUZ3P7A3F6B3SZKFJRTSANHYZDGEOFRCRLQL3FG6QCDO7MBJD7`](https://stellar.expert/explorer/testnet/contract/CBVFEUGUZ3P7A3F6B3SZKFJRTSANHYZDGEOFRCRLQL3FG6QCDO7MBJD7) |
+| Contract source | [`78ac34d`](https://github.com/Stellar-Sentinel/sentinel-contracts/commit/78ac34d843b3838bcb7525cba7e63bd2f881c2bc) |
+| Wasm SHA-256 | `f115f05839d51b1328cbdebca652161e7a5f4461ee70c5d93d390dd99b4a0a24` |
 | Score threshold | `70` (initialized) |
-| Admin account | `GAPNXDMWAMEWHEVMSDXYD5BS2V3P6E4A7OPG6F2MLME5666VSPT5BIHM` |
-| Authorized monitoring agents | None yet |
+| Admin account | `GBX5VED7NOWIUIRJODDMMWGCZKAICX2EDDMAABI6CKMK6YLVNJLIBHER` |
+| Authorized monitoring agents | `GCPTFBMUINOWMG2DVVC5QV7FREUPUWEOLE5B3GUVVZ2SAJAARWWAGUBS` (responder role) |
 
 Transaction records:
 
-- Wasm upload: [transaction `3838b8af1eadb429f37e7d4c3d6c8267773b138a967d13b816491090a32e3992`](https://stellar.expert/explorer/testnet/tx/3838b8af1eadb429f37e7d4c3d6c8267773b138a967d13b816491090a32e3992)
-- Contract deployment: [transaction `903e26dd3d1740d3833714fa30afaaf6466e0823c40250d842944dded6b8e123`](https://stellar.expert/explorer/testnet/tx/903e26dd3d1740d3833714fa30afaaf6466e0823c40250d842944dded6b8e123)
-- Initialization: [transaction `bfd4da30f78d13160f95b6d401983db6f70bbba11273e9374989e5b4d0c19b2d`](https://stellar.expert/explorer/testnet/tx/bfd4da30f78d13160f95b6d401983db6f70bbba11273e9374989e5b4d0c19b2d)
+- Contract deployment (Wasm upload + instance creation): [transaction `d5d8faf5ff685f3e3443c54a10c80c46d721fa16f831b21385197df365a3370c`](https://stellar.expert/explorer/testnet/tx/d5d8faf5ff685f3e3443c54a10c80c46d721fa16f831b21385197df365a3370c), [transaction `6d0af48a56b489d00f5a2217bddca49aba38dbdf7040f5c55df4354ca0acc0ea`](https://stellar.expert/explorer/testnet/tx/6d0af48a56b489d00f5a2217bddca49aba38dbdf7040f5c55df4354ca0acc0ea)
+- Initialization: [transaction `694702b39ce0727a9564bb38f5a5846d5ee2648dee6155c6438e7e5c2c6b8bdf`](https://stellar.expert/explorer/testnet/tx/694702b39ce0727a9564bb38f5a5846d5ee2648dee6155c6438e7e5c2c6b8bdf)
+- Monitoring agent authorized as responder: [transaction `52a9113d0b562645d0512efdea79415dd5513ec5c6a757555113f51f812b4bd9`](https://stellar.expert/explorer/testnet/tx/52a9113d0b562645d0512efdea79415dd5513ec5c6a757555113f51f812b4bd9)
 
-The admin identity alias `stellar-sentinel-testnet-admin` is stored in the deploying machine's macOS Keychain using Stellar CLI secure storage. Its secret is not in this repository. Preserve the Keychain entry and securely back up the recovery material. The backend's `.env.example` points to this contract. The event feed is connected, but it currently has no flags because no monitoring agent has been authorized.
+This redeploys the full current contract interface (agent registry/capacity, monitor/responder role separation, batch operations, pause/guardian controls, `flag_anomaly_v2`, admin handover, storage versioning) that the previous Testnet instance, deployed early in the project, predated and never received — Soroban contracts have no in-place upgrade path here, so superseding it required a fresh deployment. The admin identity alias `sentinel-admin-v2-testnet` is stored locally via Stellar CLI key storage; its secret is not in this repository. The backend's `.env.example` documents this contract ID (set a real value in a local, gitignored `.env`). The event feed is connected and now has an authorized agent (`sentinel-backend`'s optional monitoring agent, see its README) able to submit flags that cross the threshold.
 
 ### Reproduce a separate Testnet deployment
 

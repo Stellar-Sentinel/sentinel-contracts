@@ -1,0 +1,83 @@
+name: PR Safety Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  inspect:
+    name: Inspect PR changes
+    runs-on: ubuntu-latest
+    outputs:
+      sensitive: ${{ steps.inspect.outputs.sensitive }}
+    steps:
+      - name: Check out the PR commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Inspect filenames, diffs, and whitespace
+        id: inspect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+          git diff --no-ext-diff --unified=0 "$BASE_SHA" "$HEAD_SHA" > changed.diff
+          marker_compact="$(printf 'polin'; printf 'rider')"
+          marker_hyphen="$(printf 'polin-'; printf 'rider')"
+          marker_spaced="$(printf 'polin '; printf 'rider')"
+          if grep -Eiq "${marker_compact}|${marker_hyphen}|${marker_spaced}" changed-files.txt changed.diff; then
+            echo 'Blocked: a disallowed malware indicator was found in changed filenames or diff content.'
+            exit 1
+          fi
+          python3 - changed-files.txt changed.diff <<'PY'
+          import pathlib
+          import re
+          import sys
+          files = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          diff = pathlib.Path(sys.argv[2]).read_text().splitlines()
+          blocked_basenames = {".env", "id_rsa", "id_ed25519", "credentials", "secrets"}
+          blocked_suffixes = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".der"}
+          for path in files:
+              name = pathlib.PurePosixPath(path).name.lower()
+              if name in blocked_basenames or (name.startswith(".env.") and name not in {".env.example", ".env.template"}):
+                  raise SystemExit(f"Blocked: likely secret/private-key filename changed: {path}")
+              if pathlib.PurePosixPath(name).suffix in blocked_suffixes:
+                  raise SystemExit(f"Blocked: likely secret/private-key filename changed: {path}")
+          added = "\n".join(line[1:] for line in diff if line.startswith("+") and not line.startswith("+++"))
+          patterns = [r"-----BEGIN [A-Z ]*PRIVATE KEY-----", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b", r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b", r"(?<![A-Z2-7])S[A-Z2-7]{55}(?![A-Z2-7])", r"\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*[\"']?[A-Za-z0-9_./+=:-]{12,}"]
+          for pattern in patterns:
+              if re.search(pattern, added, re.IGNORECASE):
+                  raise SystemExit("Blocked: a credential-like pattern was added to the PR diff.")
+          sensitive_pattern = re.compile(r"(^|/)(\.github/workflows/|migrations?/|.*(?:contract|payment|wallet|encrypt|environment|\.env)(?:/|$)|.*(?:contract|payment|wallet|encrypt|environment)[^/]*$)", re.IGNORECASE)
+          sensitive = any(sensitive_pattern.search(path) for path in files)
+          pathlib.Path("sensitive-change.txt").write_text("true" if sensitive else "false")
+          print("Sensitive-change review:", "required" if sensitive else "not required")
+          PY
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          echo "sensitive=$(cat sensitive-change.txt)" >> "$GITHUB_OUTPUT"
+          echo 'PR safety inspection passed.'
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  manual-review:
+    name: Manual review for sensitive changes
+    needs: inspect
+    if: needs.inspect.outputs.sensitive == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: sensitive-change-review
+    steps:
+      - name: Confirm protected-area review
+        run: echo 'Protected-area changes require approval through the sensitive-change-review environment.'

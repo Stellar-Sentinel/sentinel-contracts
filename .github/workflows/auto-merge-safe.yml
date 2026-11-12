@@ -1,0 +1,43 @@
+name: Safe Auto-Merge
+
+on:
+  workflow_run:
+    workflows: [PR Safety Gate]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0] }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge for approved PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json isDraft,reviewDecision,labels,headRefOid)"
+          is_draft="$(jq -r '.isDraft' <<<"$pr_json")"
+          review_decision="$(jq -r '.reviewDecision' <<<"$pr_json")"
+          head_oid="$(jq -r '.headRefOid' <<<"$pr_json")"
+          label_present="$(jq -r '[.labels[].name] | map(select(. == "safe-to-merge")) | length > 0' <<<"$pr_json")"
+          workflow_head="${{ github.event.workflow_run.head_sha }}"
+
+          if [[ "$workflow_head" != "$head_oid" ]]; then
+            echo 'Auto-merge not enabled: the safety result is stale for the current PR head.'
+            exit 0
+          fi
+
+          if [[ "$is_draft" == "true" || "$review_decision" != "APPROVED" || "$label_present" != "true" ]]; then
+            echo 'Auto-merge not enabled: PR must be non-draft, approved, and labeled safe-to-merge.'
+            exit 0
+          fi
+
+          # --auto submits the merge only after branch protection and all required checks pass.
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --auto --squash

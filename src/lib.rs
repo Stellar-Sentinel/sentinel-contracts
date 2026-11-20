@@ -48,6 +48,13 @@ pub struct ContractConfig {
     pub threshold: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitBreakerState {
+    pub paused: bool,
+    pub guardian_paused: bool,
+}
+
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
 const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
@@ -452,6 +459,17 @@ impl StellarSentinel {
             .instance()
             .get(&DataKey::GuardianPaused)
             .unwrap_or(false)
+    }
+
+    /// Return both circuit-breaker latches from one consistent read.
+    pub fn get_circuit_breaker_state(env: Env) -> CircuitBreakerState {
+        let paused = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let guardian_paused = env
+            .storage()
+            .instance()
+            .get(&DataKey::GuardianPaused)
+            .unwrap_or(false);
+        CircuitBreakerState { paused, guardian_paused }
     }
 
     pub fn is_agent(env: Env, agent: Address) -> bool {

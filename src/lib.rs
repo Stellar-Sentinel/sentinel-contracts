@@ -50,6 +50,7 @@ pub struct ContractConfig {
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
+const FLAGGED_V3_EVENT: Symbol = symbol_short!("flaggedv3");
 const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
 const AGENT_DEL_EVENT: Symbol = symbol_short!("agent_del");
 const THRESHOLD_EVENT: Symbol = symbol_short!("threshold");
@@ -58,6 +59,8 @@ const PAUSE_EVENT: Symbol = symbol_short!("pause");
 const GUARDIAN_PAUSE_EVENT: Symbol = symbol_short!("gpause");
 const GUARDIAN_RESUME_EVENT: Symbol = symbol_short!("gunpause");
 const MAX_SCORE: u32 = 100;
+const MAX_POLICY_ID: u32 = 1_000_000;
+const MAX_REASON_MASK: u32 = 0xFFFF;
 const INTERFACE_VERSION: u32 = 1;
 const MAX_FLAG_BATCH: u32 = 16;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
@@ -534,6 +537,58 @@ impl StellarSentinel {
             .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
         bump_instance_ttl(&env);
         env.events().publish((FLAGGED_V2_EVENT, agent, subject, report_digest), score);
+    }
+
+    /// Submit a policy-aware flag without storing raw report data.
+    ///
+    /// The versioned event keeps the legacy `flagged` and `flaggedv2` schemas
+    /// unchanged while exposing bounded policy and reason metadata to indexers.
+    pub fn flag_anomaly_v3(
+        env: Env,
+        agent: Address,
+        subject: Address,
+        score: u32,
+        policy_id: u32,
+        reason_mask: u32,
+    ) {
+        require_submissions_unpaused(&env);
+        agent.require_auth();
+        if !has_responder_role(&env, &agent) {
+            panic!("not an authorized agent");
+        }
+        if score > MAX_SCORE {
+            panic!("score must be between 0 and 100");
+        }
+        if policy_id == 0 || policy_id > MAX_POLICY_ID {
+            panic!("policy id must be between 1 and 1000000");
+        }
+        if reason_mask == 0 || reason_mask > MAX_REASON_MASK {
+            panic!("reason mask must use one of the lower 16 bits");
+        }
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold)
+            .expect("not initialized");
+        if score < threshold {
+            panic!("score below risk threshold");
+        }
+        let key = DataKey::LatestFlag(subject.clone());
+        let record = FlagRecord {
+            agent: agent.clone(),
+            score,
+            ledger: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+        bump_instance_ttl(&env);
+        env.events().publish(
+            (FLAGGED_V3_EVENT, agent, subject, policy_id),
+            (score, reason_mask),
+        );
     }
 
     /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.

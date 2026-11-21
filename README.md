@@ -143,3 +143,42 @@ Pausing is an emergency control for all flag submission methods. It does not era
 For an administrator handover, prepare one `transfer_admin` invocation authorized by both the current admin and the proposed admin. The operation fails without either authorization, and the proposed address becomes the sole administrator after success. Verify the new administrator can call an admin-only method before removing access to the old signing setup.
 
 `flag_anomaly_v2` preserves the original entry point and `flagged` event. It publishes `flaggedv2` with topics `(flaggedv2, agent, subject, report_digest)` and the `u32` score as event data. The digest is exactly 32 bytes; off-chain producers must agree on canonical report bytes before hashing (for example, SHA-256). Raw reports and the digest are not added to `FlagRecord`; `get_latest_flag` continues returning only the latest agent, score, ledger, and timestamp. The backend decodes these events for its dashboard feed.
+
+## Storage TTL and archival operations
+
+The contract uses instance storage for configuration and registry metadata, and persistent storage
+for per-agent, expiry, and latest-flag records. Read/write entry points that operate on existing
+state extend the relevant TTL using the constants in `src/lib.rs`; read-only views do not recreate
+expired records. A successful maintenance read is therefore not proof that an archived entry still
+exists. If a persistent entry has expired, restore the exact Soroban ledger key through the RPC
+restore flow, then re-run the original read or transaction. Never synthesize an agent, flag, or
+expiry record from an event alone.
+
+The storage version is an instance value. Existing deployments keep their original key encoding;
+`migrate_storage_version(admin)` only backfills a missing version and rejects unknown versions.
+This is additive and does not change the ABI or require a migration for already versioned
+instances. Deployments should record the contract ID, Wasm hash, network passphrase, and the exact
+restore footprint used during maintenance.
+
+## Contract error conventions
+
+Validation is ordered from initialization and authorization, to pause state, to shape/range
+validation, and finally to threshold or state checks. A rejected call publishes no success event
+and rolls back its state changes. Existing entry points and event schemas remain stable; clients
+should match the documented error text/selectors only for diagnostics and must treat unknown
+errors as failure rather than assuming a flag was accepted.
+
+For a secret-free Testnet verification, set the contract ID and a locally configured Stellar CLI
+identity, then run:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_interface_version
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_storage_version
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_contract_config
+```
+
+These are read-only checks. They do not expose signing material, alter the deployed instance, or
+replace the locked build, test, and Clippy checks required by CI.

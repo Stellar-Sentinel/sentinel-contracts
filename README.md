@@ -129,6 +129,8 @@ See [`docs/EVENT_SCHEMA.md`](docs/EVENT_SCHEMA.md) for the stable topic/value
 contract, [`docs/WASM_BUDGET.md`](docs/WASM_BUDGET.md) for release budgets, and
 [`docs/DEPLOYMENT_VERIFICATION.md`](docs/DEPLOYMENT_VERIFICATION.md) for
 read-only Testnet verification.
+For storage retention, archival restore, migration, and rollback procedures,
+see [`docs/TTL_ARCHIVAL_OPERATIONS.md`](docs/TTL_ARCHIVAL_OPERATIONS.md).
 
 The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar contract build --locked` creates the optimized deployable artifact under `target/wasm32v1-none/release/`. CI runs the Wasm build, tests, and lint checks (Clippy).
 

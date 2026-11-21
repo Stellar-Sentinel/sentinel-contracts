@@ -17,6 +17,12 @@ configuration and usage are exposed through typed `quota` events; only counters,
 addresses, and ledger positions are stored. Existing deployments without quota
 keys use these defaults until explicitly configured.
 
+### Authorization invariants
+
+All administrator helpers require authorization by the currently stored administrator before reading or changing agent state. `authorize_monitor` grants monitoring access only, while `authorize_responder` grants flag-submission access only; `authorize_agent` remains the legacy responder-compatible entry point. An address may hold both roles, and revoking one role preserves the other. An agent cannot submit flags unless it has the responder role, and an expired grant is treated as inactive at its expiry ledger.
+
+Rejected authorization and flag-submission calls fail before any registry, latest-flag, or event write. Successful authorization changes publish `agent_add` with `(administrator, agent)` topics and `true`; `revoke_agent` publishes the matching `agent_del` event with `false`. Existing `authorize_monitor`, `authorize_responder`, and revoke helpers preserve the existing ABI and storage keys, so deployed instances remain compatible.
+
 ## Architecture
 
 ```mermaid
@@ -43,9 +49,10 @@ Initialization and administrative changes publish typed Soroban events for off-c
 | `init` | administrator address | `u32` threshold | The contract was initialized. |
 | `pause` | administrator address | `bool` | New flag submissions were paused or resumed. |
 | `gpause` / `gunpause` | guardian or administrator address | `bool` | Guardian pause state changed. |
-| `quota` | administrator or agent address | configuration `(window, limit)`, or `QuotaState` usage | Quota configuration or consumption changed. |
 
 The existing `flagged` event remains unchanged: its topics are `flagged`, agent address, and subject address, and its value is the `u32` score. The backend also decodes `flaggedv2` reports. Administrative event indexing is not currently shown in the dashboard. A failed or unauthorized call aborts before publishing an event.
+
+`flag_anomaly_v3` adds a policy-aware event without changing existing entry points. Its topics are `flaggedv3`, agent address, subject address, and a bounded non-zero `policy_id` (1–1,000,000); its value is `(score, reason_mask)`, where `reason_mask` is a non-zero lower-16-bit mask. Invalid metadata, unauthorized callers, paused submissions, and below-threshold scores abort before state or events are written. Consumers should treat the versioned event as diagnostics, not proof of fraud.
 
 ## Testnet deployment
 
@@ -99,6 +106,14 @@ stellar contract invoke \
 
 Set the resulting contract ID as the backend's `CONTRACT_ID`. Keep its Horizon and Soroban RPC endpoints on Testnet as well.
 
+### Migration, rollback, and emergency response
+
+For an existing deployment, call `migrate_storage_version --admin <ADMIN>` once with the current administrator. It only backfills the schema marker when absent and rejects unsupported versions; it does not rewrite agent roles, flags, or events. If an instance predates the agent registry, call `migrate_agent_capacity --admin <ADMIN> --active-count <COUNT> --capacity <CAPACITY>` with verified values before using capacity-sensitive helpers. Verify `get_storage_version`, `get_agent_count`, `get_agents`, and the role views after migration.
+
+Authorization changes are ordinary Soroban transactions and are not reversible by a contract upgrade. To roll back a mistaken grant, revoke the affected role (or call `revoke_agent`) and confirm the registry and role views; previously published events remain immutable. Keep the prior deployment and its contract ID available until consumers have been verified against the replacement.
+
+For an incident, the administrator can call `pause` or `set_paused --paused true`; a configured guardian can call `guardian_pause` without resume authority. Confirm `is_paused` and `is_guardian_paused`, then resume with `unpause` or `resume_from_guardian_pause` only after the incident is contained. These controls block all flag-submission entry points but leave read-only configuration and latest-flag views available.
+
 ## Project layout
 
 - `src/lib.rs` — contract entry points, storage keys, authorization, threshold checks, event publication, and latest-flag lookup.
@@ -118,12 +133,20 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+See [`docs/EVENT_SCHEMA.md`](docs/EVENT_SCHEMA.md) for the stable topic/value
+contract, [`docs/WASM_BUDGET.md`](docs/WASM_BUDGET.md) for release budgets, and
+[`docs/DEPLOYMENT_VERIFICATION.md`](docs/DEPLOYMENT_VERIFICATION.md) for
+read-only Testnet verification.
+The reviewed invariants, boundary cases, RPC examples, and versioning rules
+are in [`docs/EVENT_TOPIC_SCHEMA_DESIGN.md`](docs/EVENT_TOPIC_SCHEMA_DESIGN.md).
+
 The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar contract build --locked` creates the optimized deployable artifact under `target/wasm32v1-none/release/`. CI runs the Wasm build, tests, and lint checks (Clippy).
 
 ## Contract interface
 
 - `get_interface_version()` — return the interface generation; increment it for incompatible method or event changes.
 - `get_contract_config()` — read the administrator and threshold together; returns `None` before initialization.
+- `get_configuration_view()` — read a bounded, non-sensitive snapshot of initialization, threshold, pause, guardian, capacity, active-agent count, and storage/interface versions. It is public, emits no event, preserves the existing ABI, and returns optional fields for legacy or uninitialized instances. See [`docs/read-only-configuration-views.md`](docs/read-only-configuration-views.md).
 - `get_storage_version()` / `migrate_storage_version(admin)` — inspect and backfill the instance storage schema version.
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
 - `is_initialized()` — check configuration state without causing an uninitialized-state panic.
@@ -132,31 +155,46 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage legacy responder grants. `authorize_monitor` / `authorize_responder` and matching revoke methods manage roles independently. Batch methods handle up to 16 addresses; `revoke_self(agent)` lets an agent remove its own grant.
 - `authorize_agent_until(admin, agent, expires_at_ledger)` — grant responder access through a ledger-bounded expiry.
 - `set_agent_capacity(admin, capacity)` / `get_agent_capacity()` / `get_agent_count()` / `get_agents(admin)` — manage and inspect the capped agent registry. `migrate_agent_capacity` supports existing instances.
-- `set_submission_quota(admin, window_ledgers, max_flags)` / `get_submission_quota()` / `get_agent_quota(agent)` — configure and inspect bounded per-agent submission usage.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold. Repeating the current value refreshes instance TTL without rewriting state or emitting a duplicate audit event.
 - `is_score_accepted(score)` — preflight the score range and active threshold; `flag_anomaly` remains authoritative.
 - `pause(admin)` / `unpause(admin)` / `set_paused(admin, paused)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
 - `set_emergency_guardian(admin, guardian)` / `guardian_pause(guardian)` / `resume_from_guardian_pause(admin)` — provide a guardian with pause-only emergency authority.
+- `is_guardian_paused()` — inspect the emergency guardian latch without changing state.
 - `is_agent(agent)` — check agent authorization and extend the active contract instance TTL.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
 - `flag_anomaly_v2(agent, subject, score, report_digest)` — apply the same validation and record update, then publish a versioned event with a fixed 32-byte report digest.
+- `flag_anomaly_v3(agent, subject, score, policy_id, reason_mask)` — apply the same validation and record update, then publish bounded policy and reason metadata in a versioned event.
 - `flag_anomalies(agent, submissions)` — submit 1–16 subject/score entries in one transaction, validating the full batch before writes.
 - `get_latest_flag(subject)` — read the latest record, if one exists.
 - `clear_latest_flag(admin, subject)` — clear a subject's latest record; previously published events remain available for indexing.
 
-Successful initialization and state-changing administrative calls publish the corresponding events described above. Read methods do not extend the TTL of each grant; expired grants are removed from the active registry when agent counts or lists are refreshed.
+Successful initialization and state-changing administrative calls publish the corresponding events described above. Agent-grant reads do not extend each grant's TTL; expired grants are removed from the active registry when agent counts or lists are refreshed. `get_latest_flag` refreshes a live persistent flag record when it is read, using the same bounded threshold and bump as flag writes.
 
-Only trusted addresses should receive agent authorization. Authorization helpers
-require the supplied address to authorize the invocation and then verify the
-stored role. Failed authorization, quota, score, or threshold checks occur
-before flag storage or events are written. Quota arithmetic is checked and
-bounded; malformed stored quota configuration fails closed. The contract enforces
-the score range and threshold, but it cannot establish that an off-chain score is
-accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and
-configure each network separately; never commit secrets.
+Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. The contract instance and latest-flag records use persistent Soroban storage and renew their TTL only at bounded extension points: initialization, state-changing calls, live latest-flag writes, and latest-flag reads. If a persistent entry has already been archived, the caller must include a Soroban restore operation in the transaction footprint before invoking a method that reads it; the contract cannot restore an archived entry from inside the invocation. Events remain append-only history even if a latest-flag record is archived or cleared. Deploy, initialize, and configure each network separately; never commit secrets.
 
 Pausing is an emergency control for all flag submission methods. It does not erase existing flags or block read methods, and new deployments start unpaused. The administrator controls the standard pause; an optional guardian can pause, while only the administrator can resume a guardian pause.
+
+### Circuit-breaker runbook
+
+Use the standard pause when the administrator detects abnormal flag volume or a compromised responder. A configured guardian may call `guardian_pause` immediately; only the administrator can call `resume_from_guardian_pause`. Both latches must be clear before submissions resume, and rejected calls do not write a latest flag or publish a flag event.
+
+The pause events are deterministic and contain no report data: `pause` has topics `(pause, administrator)` and a boolean value; guardian activation and recovery use `(gpause, guardian)` and `(gunpause, administrator)` with boolean values. Existing `flagged` and `flaggedv2` events are unchanged. Consumers should treat either pause latch as a submission circuit breaker and keep read paths available for incident response.
+
+For a deployment or migration, read `get_storage_version` first, run `migrate_storage_version(admin)` only when the instance is an older supported schema, then verify `is_paused`, `is_guardian_paused`, and `get_interface_version`. Roll back by pausing submissions and restoring the prior application deployment; Soroban contract code is not upgraded in place, so a new contract instance requires a separate initialization and compatibility review.
+
+For Testnet verification without secrets:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> --network testnet --send=no -- \
+  is_paused
+stellar contract invoke --id <CONTRACT_ID> --network testnet --send=no -- \
+  is_guardian_paused
+```
+
+The backend should alert on `pause`, `gpause`, and `gunpause`, while the frontend should show submissions as blocked whenever either latch is active. Do not treat a pause or an on-chain flag as proof of fraud, and never place signing seeds or report contents in contract state or event payloads.
 
 For an administrator handover, prepare one `transfer_admin` invocation authorized by both the current admin and the proposed admin. The operation fails without either authorization, and the proposed address becomes the sole administrator after success. Verify the new administrator can call an admin-only method before removing access to the old signing setup.
 
 `flag_anomaly_v2` preserves the original entry point and `flagged` event. It publishes `flaggedv2` with topics `(flaggedv2, agent, subject, report_digest)` and the `u32` score as event data. The digest is exactly 32 bytes; off-chain producers must agree on canonical report bytes before hashing (for example, SHA-256). Raw reports and the digest are not added to `FlagRecord`; `get_latest_flag` continues returning only the latest agent, score, ledger, and timestamp. The backend decodes these events for its dashboard feed.
+
+`flag_anomaly_v3` is additive and preserves the v1/v2 ABI and event schemas. It stores only the existing latest `FlagRecord`; policy IDs and reason masks exist only in the bounded event payload. Existing deployments can continue using v1/v2, while v3 consumers must explicitly opt into the new event schema.

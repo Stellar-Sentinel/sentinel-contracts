@@ -1,6 +1,9 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::{
+    storage::Persistent as PersistentStorage, Address as _, Events as _, Ledger as _, MockAuth,
+    MockAuthInvoke,
+};
 use soroban_sdk::IntoVal;
 use soroban_sdk::{vec, BytesN, Symbol, TryFromVal};
 
@@ -285,6 +288,35 @@ fn latest_flag_is_empty_before_first_flag() {
 }
 
 #[test]
+fn reading_latest_flag_refreshes_persistent_ttl() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.flag_anomaly(&agent, &subject, &80);
+
+    let key = DataKey::LatestFlag(subject.clone());
+    env.ledger().set_sequence_number(95_000);
+    let ttl_before_read = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&key)
+    });
+    assert!(ttl_before_read < PERSISTENT_TTL_THRESHOLD);
+
+    assert!(client.get_latest_flag(&subject).is_some());
+
+    let ttl_after_read = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&key)
+    });
+    assert_eq!(ttl_after_read, PERSISTENT_TTL_BUMP);
+}
+
+#[test]
 #[should_panic(expected = "score below risk threshold")]
 fn agent_cannot_flag_below_threshold() {
     let env = Env::default();
@@ -507,6 +539,72 @@ fn versioned_flag_enforces_agent_and_score_checks() {
     assert!(client.try_flag_anomaly_v2(&agent, &subject, &101, &digest).is_err());
     assert_eq!(client.get_latest_flag(&subject), None);
     assert!(env.events().all().is_empty());
+}
+
+#[test]
+fn policy_aware_flag_emits_bounded_metadata_and_preserves_latest_state() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.flag_anomaly_v3(&agent, &subject, &70, &42, &0b101);
+
+    let (_, topics, value) = env.events().all().last().unwrap();
+    assert_eq!(Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(), symbol_short!("flaggedv3"));
+    assert_eq!(Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(), agent);
+    assert_eq!(Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap(), subject);
+    assert_eq!(u32::try_from_val(&env, &topics.get(3).unwrap()).unwrap(), 42);
+    assert_eq!(<(u32, u32)>::try_from_val(&env, &value).unwrap(), (70, 0b101));
+    assert_eq!(client.get_latest_flag(&subject).unwrap().score, 70);
+}
+
+#[test]
+fn policy_aware_flag_rejects_bad_metadata_without_state_or_event_changes() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    assert!(client.try_flag_anomaly_v3(&stranger, &subject, &80, &1, &1).is_err());
+    assert!(client.try_flag_anomaly_v3(&agent, &subject, &80, &0, &1).is_err());
+    assert!(client.try_flag_anomaly_v3(&agent, &subject, &80, &(MAX_POLICY_ID + 1), &1).is_err());
+    assert!(client.try_flag_anomaly_v3(&agent, &subject, &80, &1, &0).is_err());
+    assert!(client.try_flag_anomaly_v3(&agent, &subject, &80, &1, &(MAX_REASON_MASK + 1)).is_err());
+    assert!(client.try_flag_anomaly_v3(&agent, &subject, &69, &1, &1).is_err());
+    assert!(client.try_flag_anomaly_v3(&agent, &subject, &101, &1, &1).is_err());
+    assert_eq!(client.get_latest_flag(&subject), None);
+    assert!(env.events().all().is_empty());
+}
+
+#[test]
+fn policy_aware_flag_obeys_pause_state_and_threshold_boundaries() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.pause(&admin);
+    assert!(client.try_flag_anomaly_v3(&agent, &subject, &70, &1, &1).is_err());
+    client.unpause(&admin);
+    client.flag_anomaly_v3(&agent, &subject, &70, &MAX_POLICY_ID, &MAX_REASON_MASK);
+    assert_eq!(client.get_latest_flag(&subject).unwrap().score, 70);
 }
 
 #[test]

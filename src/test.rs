@@ -654,3 +654,68 @@ fn config_snapshot_storage_version_and_initialization_event_are_available() {
     assert_eq!(config.admin, admin);
     assert_eq!(config.threshold, 75);
 }
+
+#[test]
+fn configuration_view_is_bounded_read_only_and_complete() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let agent = Address::generate(&env);
+
+    let before = client.get_configuration_view();
+    assert_eq!(before.interface_version, INTERFACE_VERSION);
+    assert!(!before.initialized);
+    assert_eq!(before.admin, None);
+    assert_eq!(before.threshold, None);
+    assert_eq!(before.agent_count, 0);
+    assert_eq!(before.agent_capacity, None);
+    assert_eq!(before.storage_version, None);
+    assert!(env.events().all().is_empty());
+
+    env.mock_all_auths();
+    client.initialize(&admin, &0);
+    client.set_emergency_guardian(&admin, &guardian);
+    client.authorize_agent(&admin, &agent);
+    client.pause(&admin);
+    assert_eq!(env.events().all().len(), 1);
+    let snapshot = client.get_configuration_view();
+
+    assert_eq!(snapshot.admin, Some(admin.clone()));
+    assert_eq!(snapshot.threshold, Some(0));
+    assert!(snapshot.initialized);
+    assert!(snapshot.paused);
+    assert!(!snapshot.guardian_paused);
+    assert_eq!(snapshot.emergency_guardian, Some(guardian));
+    assert_eq!(snapshot.agent_count, 1);
+    assert_eq!(snapshot.agent_capacity, Some(HARD_AGENT_CAPACITY));
+    assert_eq!(snapshot.storage_version, Some(STORAGE_VERSION));
+    assert!(env.events().all().is_empty());
+
+    client.set_agent_capacity(&admin, &1);
+    let unchanged = client.get_configuration_view();
+    assert_eq!(unchanged.agent_count, 1);
+    assert_eq!(unchanged.agent_capacity, Some(1));
+    assert!(unchanged.paused);
+}
+
+#[test]
+fn configuration_view_excludes_expired_agents_without_rewriting_registry() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &100);
+    let expiry = env.ledger().sequence() + 1;
+    client.authorize_agent_until(&admin, &agent, &expiry);
+    assert_eq!(client.get_agent_count(), 1);
+    env.ledger().set_sequence_number(expiry);
+
+    let view = client.get_configuration_view();
+    assert_eq!(view.agent_count, 0);
+    assert_eq!(client.get_agents(&admin).len(), 0);
+}

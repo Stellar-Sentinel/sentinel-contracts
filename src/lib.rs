@@ -48,6 +48,27 @@ pub struct ContractConfig {
     pub threshold: u32,
 }
 
+/// Bounded, non-sensitive configuration metadata for operators.
+///
+/// Optional fields distinguish an uninitialized or older instance from a
+/// configured value. The view intentionally reports the active-agent count,
+/// not the registry addresses; use the administrator-authenticated
+/// `get_agents` entry point when the addresses are required.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigurationView {
+    pub interface_version: u32,
+    pub initialized: bool,
+    pub admin: Option<Address>,
+    pub threshold: Option<u32>,
+    pub paused: bool,
+    pub guardian_paused: bool,
+    pub emergency_guardian: Option<Address>,
+    pub agent_count: u32,
+    pub agent_capacity: Option<u32>,
+    pub storage_version: Option<u32>,
+}
+
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
 const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
@@ -133,6 +154,35 @@ impl StellarSentinel {
             }
             _ => None,
         }
+    }
+
+    /// Return bounded, non-sensitive configuration metadata in one read.
+    ///
+    /// This view is public and does not emit events or rewrite configuration
+    /// storage. It refreshes only the instance TTL for initialized instances.
+    pub fn get_configuration_view(env: Env) -> ConfigurationView {
+        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        let initialized = admin.is_some();
+        let view = ConfigurationView {
+            interface_version: INTERFACE_VERSION,
+            initialized,
+            admin,
+            threshold: env.storage().instance().get(&DataKey::RiskThreshold),
+            paused: env.storage().instance().get(&DataKey::Paused).unwrap_or(false),
+            guardian_paused: env
+                .storage()
+                .instance()
+                .get(&DataKey::GuardianPaused)
+                .unwrap_or(false),
+            emergency_guardian: env.storage().instance().get(&DataKey::EmergencyGuardian),
+            agent_count: active_agent_count_read_only(&env),
+            agent_capacity: env.storage().instance().get(&DataKey::AgentCapacity),
+            storage_version: env.storage().instance().get(&DataKey::StorageVersion),
+        };
+        if initialized {
+            bump_instance_ttl(&env);
+        }
+        view
     }
 
     pub fn get_storage_version(env: Env) -> u32 {
@@ -688,6 +738,30 @@ fn active_agent_count(env: &Env) -> u32 {
     env.storage().instance().set(&DataKey::AgentRegistry, &active);
     env.storage().instance().set(&DataKey::AgentCount, &count);
     count
+}
+
+fn active_agent_count_read_only(env: &Env) -> u32 {
+    let agents: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::AgentRegistry)
+        .unwrap_or(Vec::new(env));
+    let mut active = 0_u32;
+    for agent in agents.iter() {
+        let authorized: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Agent(agent.clone()))
+            .unwrap_or(false);
+        let expiry: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentExpiry(agent.clone()));
+        if authorized && expiry.map(|ledger| env.ledger().sequence() < ledger).unwrap_or(true) {
+            active = active.checked_add(1).expect("agent count overflow");
+        }
+    }
+    active
 }
 
 fn agent_capacity(env: &Env) -> u32 {

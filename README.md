@@ -115,6 +115,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 
 - `get_interface_version()` — return the interface generation; increment it for incompatible method or event changes.
 - `get_contract_config()` — read the administrator and threshold together; returns `None` before initialization.
+- `get_configuration_view()` — read a bounded, non-sensitive snapshot of initialization, threshold, pause, guardian, capacity, active-agent count, and storage/interface versions. It is public, emits no event, preserves the existing ABI, and returns optional fields for legacy or uninitialized instances. See [`docs/read-only-configuration-views.md`](docs/read-only-configuration-views.md).
 - `get_storage_version()` / `migrate_storage_version(admin)` — inspect and backfill the instance storage schema version.
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
 - `is_initialized()` — check configuration state without causing an uninitialized-state panic.

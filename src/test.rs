@@ -763,6 +763,40 @@ fn admin_and_guardian_pauses_gate_all_flag_submission_methods() {
 }
 
 #[test]
+fn circuit_breaker_guardian_recovery_is_atomic_and_emits_deterministic_events() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.set_emergency_guardian(&admin, &guardian);
+    assert!(client.try_guardian_pause(&stranger).is_err());
+    assert!(!client.is_guardian_paused());
+    assert!(env.events().all().is_empty());
+
+    client.guardian_pause(&guardian);
+    let (_, topics, value) = env.events().all().last().unwrap();
+    assert_eq!(Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(), symbol_short!("gpause"));
+    assert_eq!(Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(), guardian);
+    assert!(bool::try_from_val(&env, &value).unwrap());
+    assert!(client.is_guardian_paused());
+    assert!(client.try_flag_anomaly(&agent, &subject, &70).is_err());
+    assert_eq!(client.get_latest_flag(&subject), None);
+
+    client.resume_from_guardian_pause(&admin);
+    assert!(!client.is_guardian_paused());
+    client.flag_anomaly(&agent, &subject, &70);
+    assert_eq!(client.get_latest_flag(&subject).unwrap().score, 70);
+}
+
+#[test]
 fn config_snapshot_storage_version_and_initialization_event_are_available() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());

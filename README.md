@@ -149,6 +149,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `is_score_accepted(score)` — preflight the score range and active threshold; `flag_anomaly` remains authoritative.
 - `pause(admin)` / `unpause(admin)` / `set_paused(admin, paused)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
 - `set_emergency_guardian(admin, guardian)` / `guardian_pause(guardian)` / `resume_from_guardian_pause(admin)` — provide a guardian with pause-only emergency authority.
+- `is_guardian_paused()` — inspect the emergency guardian latch without changing state.
 - `is_agent(agent)` — check agent authorization and extend the active contract instance TTL.
 - `flag_anomaly(agent, subject, score)` — require an authorized agent and a score at or above threshold; persist the latest record and publish `flagged`.
 - `flag_anomaly_v2(agent, subject, score, report_digest)` — apply the same validation and record update, then publish a versioned event with a fixed 32-byte report digest.
@@ -162,6 +163,25 @@ Successful initialization and state-changing administrative calls publish the co
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. The contract instance and latest-flag records use persistent Soroban storage and renew their TTL only at bounded extension points: initialization, state-changing calls, live latest-flag writes, and latest-flag reads. If a persistent entry has already been archived, the caller must include a Soroban restore operation in the transaction footprint before invoking a method that reads it; the contract cannot restore an archived entry from inside the invocation. Events remain append-only history even if a latest-flag record is archived or cleared. Deploy, initialize, and configure each network separately; never commit secrets.
 
 Pausing is an emergency control for all flag submission methods. It does not erase existing flags or block read methods, and new deployments start unpaused. The administrator controls the standard pause; an optional guardian can pause, while only the administrator can resume a guardian pause.
+
+### Circuit-breaker runbook
+
+Use the standard pause when the administrator detects abnormal flag volume or a compromised responder. A configured guardian may call `guardian_pause` immediately; only the administrator can call `resume_from_guardian_pause`. Both latches must be clear before submissions resume, and rejected calls do not write a latest flag or publish a flag event.
+
+The pause events are deterministic and contain no report data: `pause` has topics `(pause, administrator)` and a boolean value; guardian activation and recovery use `(gpause, guardian)` and `(gunpause, administrator)` with boolean values. Existing `flagged` and `flaggedv2` events are unchanged. Consumers should treat either pause latch as a submission circuit breaker and keep read paths available for incident response.
+
+For a deployment or migration, read `get_storage_version` first, run `migrate_storage_version(admin)` only when the instance is an older supported schema, then verify `is_paused`, `is_guardian_paused`, and `get_interface_version`. Roll back by pausing submissions and restoring the prior application deployment; Soroban contract code is not upgraded in place, so a new contract instance requires a separate initialization and compatibility review.
+
+For Testnet verification without secrets:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> --network testnet --send=no -- \
+  is_paused
+stellar contract invoke --id <CONTRACT_ID> --network testnet --send=no -- \
+  is_guardian_paused
+```
+
+The backend should alert on `pause`, `gpause`, and `gunpause`, while the frontend should show submissions as blocked whenever either latch is active. Do not treat a pause or an on-chain flag as proof of fraud, and never place signing seeds or report contents in contract state or event payloads.
 
 For an administrator handover, prepare one `transfer_admin` invocation authorized by both the current admin and the proposed admin. The operation fails without either authorization, and the proposed address becomes the sole administrator after success. Verify the new administrator can call an admin-only method before removing access to the old signing setup.
 

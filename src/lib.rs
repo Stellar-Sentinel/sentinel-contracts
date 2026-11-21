@@ -48,6 +48,21 @@ pub struct ContractConfig {
     pub threshold: u32,
 }
 
+/// Bounded read-only view of the contract's operator configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigurationSnapshot {
+    pub admin: Option<Address>,
+    pub threshold: Option<u32>,
+    pub agents: Vec<Address>,
+    pub agent_count: u32,
+    pub agent_capacity: u32,
+    pub paused: bool,
+    pub guardian: Option<Address>,
+    pub guardian_paused: bool,
+    pub storage_version: u32,
+}
+
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
 const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
@@ -132,6 +147,59 @@ impl StellarSentinel {
                 Some(ContractConfig { admin, threshold })
             }
             _ => None,
+        }
+    }
+
+    /// Return a bounded snapshot of all public operator configuration.
+    ///
+    /// This view intentionally does not refresh TTLs or repair expired
+    /// registry entries, so callers can use it without mutating state.
+    pub fn get_configuration_snapshot(env: Env) -> ConfigurationSnapshot {
+        let admin = env.storage().instance().get(&DataKey::Admin);
+        let threshold = env.storage().instance().get(&DataKey::RiskThreshold);
+        let registered: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentRegistry)
+            .unwrap_or(Vec::new(&env));
+        let mut agents = Vec::new(&env);
+        for agent in registered.iter() {
+            let authorized: bool = env
+                .storage()
+                .instance()
+                .get(&DataKey::Agent(agent.clone()))
+                .unwrap_or(false);
+            let expiry: Option<u32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::AgentExpiry(agent.clone()));
+            if authorized && expiry.map(|ledger| env.ledger().sequence() < ledger).unwrap_or(true) {
+                agents.push_back(agent);
+            }
+        }
+        let agent_count = agents.len();
+        ConfigurationSnapshot {
+            admin,
+            threshold,
+            agents,
+            agent_count,
+            agent_capacity: env
+                .storage()
+                .instance()
+                .get(&DataKey::AgentCapacity)
+                .unwrap_or(HARD_AGENT_CAPACITY),
+            paused: env.storage().instance().get(&DataKey::Paused).unwrap_or(false),
+            guardian: env.storage().instance().get(&DataKey::EmergencyGuardian),
+            guardian_paused: env
+                .storage()
+                .instance()
+                .get(&DataKey::GuardianPaused)
+                .unwrap_or(false),
+            storage_version: env
+                .storage()
+                .instance()
+                .get(&DataKey::StorageVersion)
+                .unwrap_or(0),
         }
     }
 

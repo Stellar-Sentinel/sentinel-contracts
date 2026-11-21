@@ -19,6 +19,58 @@ fn test_initialize_and_threshold() {
 }
 
 #[test]
+fn configuration_snapshot_is_bounded_and_read_only() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    env.mock_all_auths();
+
+    let before = client.get_configuration_snapshot();
+    assert_eq!(before.admin, None);
+    assert_eq!(before.threshold, None);
+    assert_eq!(before.agent_count, 0);
+    assert_eq!(before.agent_capacity, HARD_AGENT_CAPACITY);
+
+    client.initialize(&admin, &75);
+    client.authorize_agent(&admin, &agent);
+    client.set_emergency_guardian(&admin, &guardian);
+    client.pause(&admin);
+
+    let snapshot = client.get_configuration_snapshot();
+    assert_eq!(snapshot.admin, Some(admin));
+    assert_eq!(snapshot.threshold, Some(75));
+    assert_eq!(snapshot.agents, vec![&env, agent]);
+    assert_eq!(snapshot.agent_count, 1);
+    assert_eq!(snapshot.agent_capacity, HARD_AGENT_CAPACITY);
+    assert!(snapshot.paused);
+    assert_eq!(snapshot.guardian, Some(guardian));
+    assert!(!snapshot.guardian_paused);
+    assert_eq!(snapshot.storage_version, STORAGE_VERSION);
+}
+
+#[test]
+fn configuration_snapshot_excludes_expired_agents_without_repairing_storage() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &75);
+    client.authorize_agent_until(&admin, &agent, &10);
+    env.ledger().set_sequence_number(10);
+
+    let snapshot = client.get_configuration_snapshot();
+    assert_eq!(snapshot.agent_count, 0);
+    assert!(snapshot.agents.is_empty());
+    assert_eq!(client.get_agent_count(), 0);
+}
+
+#[test]
 fn administrator_transfer_requires_both_parties_and_preserves_state() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());

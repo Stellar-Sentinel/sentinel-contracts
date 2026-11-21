@@ -12,5 +12,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - run: cargo build --locked --target wasm32-unknown-unknown --release
+      - name: Check Wasm size budget
+        run: bash scripts/check-wasm-budget.sh target/wasm32-unknown-unknown/release/sentinel_contract.wasm
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings

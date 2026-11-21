@@ -55,8 +55,30 @@ pub struct CircuitBreakerState {
     pub guardian_paused: bool,
 }
 
+/// Bounded, non-sensitive configuration metadata for operators.
+///
+/// Optional fields distinguish an uninitialized or older instance from a
+/// configured value. The view intentionally reports the active-agent count,
+/// not the registry addresses; use the administrator-authenticated
+/// `get_agents` entry point when the addresses are required.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigurationView {
+    pub interface_version: u32,
+    pub initialized: bool,
+    pub admin: Option<Address>,
+    pub threshold: Option<u32>,
+    pub paused: bool,
+    pub guardian_paused: bool,
+    pub emergency_guardian: Option<Address>,
+    pub agent_count: u32,
+    pub agent_capacity: Option<u32>,
+    pub storage_version: Option<u32>,
+}
+
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
 const FLAGGED_V2_EVENT: Symbol = symbol_short!("flaggedv2");
+const FLAGGED_V3_EVENT: Symbol = symbol_short!("flaggedv3");
 const AGENT_ADD_EVENT: Symbol = symbol_short!("agent_add");
 const AGENT_DEL_EVENT: Symbol = symbol_short!("agent_del");
 const THRESHOLD_EVENT: Symbol = symbol_short!("threshold");
@@ -65,6 +87,8 @@ const PAUSE_EVENT: Symbol = symbol_short!("pause");
 const GUARDIAN_PAUSE_EVENT: Symbol = symbol_short!("gpause");
 const GUARDIAN_RESUME_EVENT: Symbol = symbol_short!("gunpause");
 const MAX_SCORE: u32 = 100;
+const MAX_POLICY_ID: u32 = 1_000_000;
+const MAX_REASON_MASK: u32 = 0xFFFF;
 const INTERFACE_VERSION: u32 = 1;
 const MAX_FLAG_BATCH: u32 = 16;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
@@ -140,6 +164,35 @@ impl StellarSentinel {
             }
             _ => None,
         }
+    }
+
+    /// Return bounded, non-sensitive configuration metadata in one read.
+    ///
+    /// This view is public and does not emit events or rewrite configuration
+    /// storage. It refreshes only the instance TTL for initialized instances.
+    pub fn get_configuration_view(env: Env) -> ConfigurationView {
+        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        let initialized = admin.is_some();
+        let view = ConfigurationView {
+            interface_version: INTERFACE_VERSION,
+            initialized,
+            admin,
+            threshold: env.storage().instance().get(&DataKey::RiskThreshold),
+            paused: env.storage().instance().get(&DataKey::Paused).unwrap_or(false),
+            guardian_paused: env
+                .storage()
+                .instance()
+                .get(&DataKey::GuardianPaused)
+                .unwrap_or(false),
+            emergency_guardian: env.storage().instance().get(&DataKey::EmergencyGuardian),
+            agent_count: active_agent_count_read_only(&env),
+            agent_capacity: env.storage().instance().get(&DataKey::AgentCapacity),
+            storage_version: env.storage().instance().get(&DataKey::StorageVersion),
+        };
+        if initialized {
+            bump_instance_ttl(&env);
+        }
+        view
     }
 
     pub fn get_storage_version(env: Env) -> u32 {
@@ -554,6 +607,58 @@ impl StellarSentinel {
         env.events().publish((FLAGGED_V2_EVENT, agent, subject, report_digest), score);
     }
 
+    /// Submit a policy-aware flag without storing raw report data.
+    ///
+    /// The versioned event keeps the legacy `flagged` and `flaggedv2` schemas
+    /// unchanged while exposing bounded policy and reason metadata to indexers.
+    pub fn flag_anomaly_v3(
+        env: Env,
+        agent: Address,
+        subject: Address,
+        score: u32,
+        policy_id: u32,
+        reason_mask: u32,
+    ) {
+        require_submissions_unpaused(&env);
+        agent.require_auth();
+        if !has_responder_role(&env, &agent) {
+            panic!("not an authorized agent");
+        }
+        if score > MAX_SCORE {
+            panic!("score must be between 0 and 100");
+        }
+        if policy_id == 0 || policy_id > MAX_POLICY_ID {
+            panic!("policy id must be between 1 and 1000000");
+        }
+        if reason_mask == 0 || reason_mask > MAX_REASON_MASK {
+            panic!("reason mask must use one of the lower 16 bits");
+        }
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RiskThreshold)
+            .expect("not initialized");
+        if score < threshold {
+            panic!("score below risk threshold");
+        }
+        let key = DataKey::LatestFlag(subject.clone());
+        let record = FlagRecord {
+            agent: agent.clone(),
+            score,
+            ledger: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+        bump_instance_ttl(&env);
+        env.events().publish(
+            (FLAGGED_V3_EVENT, agent, subject, policy_id),
+            (score, reason_mask),
+        );
+    }
+
     /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.
     pub fn flag_anomalies(env: Env, agent: Address, submissions: Vec<FlagSubmission>) {
         require_submissions_unpaused(&env);
@@ -599,10 +704,23 @@ impl StellarSentinel {
         bump_instance_ttl(&env);
     }
 
-    /// Return the latest recorded flag without extending its retention TTL.
+    /// Return the latest recorded flag and refresh its persistent retention TTL.
+    ///
+    /// Persistent entries remain restorable after archival, but an archived
+    /// entry must be restored in the transaction footprint before this method
+    /// can read it. Reads while the entry is live keep frequently queried
+    /// security state from reaching archival in the first place.
     pub fn get_latest_flag(env: Env, subject: Address) -> Option<FlagRecord> {
         let key = DataKey::LatestFlag(subject);
-        env.storage().persistent().get(&key)
+        let record = env.storage().persistent().get(&key);
+        if record.is_some() {
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_TTL_THRESHOLD,
+                PERSISTENT_TTL_BUMP,
+            );
+        }
+        record
     }
 
     pub fn clear_latest_flag(env: Env, admin: Address, subject: Address) {
@@ -706,6 +824,30 @@ fn active_agent_count(env: &Env) -> u32 {
     env.storage().instance().set(&DataKey::AgentRegistry, &active);
     env.storage().instance().set(&DataKey::AgentCount, &count);
     count
+}
+
+fn active_agent_count_read_only(env: &Env) -> u32 {
+    let agents: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::AgentRegistry)
+        .unwrap_or(Vec::new(env));
+    let mut active = 0_u32;
+    for agent in agents.iter() {
+        let authorized: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Agent(agent.clone()))
+            .unwrap_or(false);
+        let expiry: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentExpiry(agent.clone()));
+        if authorized && expiry.map(|ledger| env.ledger().sequence() < ledger).unwrap_or(true) {
+            active = active.checked_add(1).expect("agent count overflow");
+        }
+    }
+    active
 }
 
 fn agent_capacity(env: &Env) -> u32 {

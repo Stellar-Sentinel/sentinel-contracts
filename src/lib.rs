@@ -636,10 +636,23 @@ impl StellarSentinel {
         bump_instance_ttl(&env);
     }
 
-    /// Return the latest recorded flag without extending its retention TTL.
+    /// Return the latest recorded flag and refresh its persistent retention TTL.
+    ///
+    /// Persistent entries remain restorable after archival, but an archived
+    /// entry must be restored in the transaction footprint before this method
+    /// can read it. Reads while the entry is live keep frequently queried
+    /// security state from reaching archival in the first place.
     pub fn get_latest_flag(env: Env, subject: Address) -> Option<FlagRecord> {
         let key = DataKey::LatestFlag(subject);
-        env.storage().persistent().get(&key)
+        let record = env.storage().persistent().get(&key);
+        if record.is_some() {
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_TTL_THRESHOLD,
+                PERSISTENT_TTL_BUMP,
+            );
+        }
+        record
     }
 
     pub fn clear_latest_flag(env: Env, admin: Address, subject: Address) {

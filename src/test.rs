@@ -1,6 +1,9 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::{
+    storage::Persistent as PersistentStorage, Address as _, Events as _, Ledger as _, MockAuth,
+    MockAuthInvoke,
+};
 use soroban_sdk::IntoVal;
 use soroban_sdk::{vec, BytesN, Symbol, TryFromVal};
 
@@ -282,6 +285,35 @@ fn latest_flag_is_empty_before_first_flag() {
     let client = StellarSentinelClient::new(&env, &contract_id);
     let subject = Address::generate(&env);
     assert_eq!(client.get_latest_flag(&subject), None);
+}
+
+#[test]
+fn reading_latest_flag_refreshes_persistent_ttl() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.flag_anomaly(&agent, &subject, &80);
+
+    let key = DataKey::LatestFlag(subject.clone());
+    env.ledger().set_sequence_number(95_000);
+    let ttl_before_read = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&key)
+    });
+    assert!(ttl_before_read < PERSISTENT_TTL_THRESHOLD);
+
+    assert!(client.get_latest_flag(&subject).is_some());
+
+    let ttl_after_read = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&key)
+    });
+    assert_eq!(ttl_after_read, PERSISTENT_TTL_BUMP);
 }
 
 #[test]

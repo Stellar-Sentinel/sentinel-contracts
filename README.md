@@ -9,6 +9,14 @@ Soroban contract for administrator-managed monitoring and response roles, a conf
 
 `get_agents` returns the administrator-authenticated list of active agents. The registry has a configurable capacity up to 128 addresses; repeated authorization is idempotent, and revocation or grant expiry releases capacity. Legacy `authorize_agent` grants responder access. Explicit monitor and responder roles can be managed independently. Expiring grants are supported for up to 100,000 ledgers.
 
+Flag submissions use a bounded per-agent quota. New instances default to 16
+flags per 100 ledgers; administrators can set a smaller window and limit within
+the contract bounds. Single and batch entry points consume the same counter, and
+a batch is rejected before any flag writes when it would exceed the limit. Quota
+configuration and usage are exposed through typed `quota` events; only counters,
+addresses, and ledger positions are stored. Existing deployments without quota
+keys use these defaults until explicitly configured.
+
 ## Architecture
 
 ```mermaid
@@ -35,6 +43,7 @@ Initialization and administrative changes publish typed Soroban events for off-c
 | `init` | administrator address | `u32` threshold | The contract was initialized. |
 | `pause` | administrator address | `bool` | New flag submissions were paused or resumed. |
 | `gpause` / `gunpause` | guardian or administrator address | `bool` | Guardian pause state changed. |
+| `quota` | administrator or agent address | configuration `(window, limit)`, or `QuotaState` usage | Quota configuration or consumption changed. |
 
 The existing `flagged` event remains unchanged: its topics are `flagged`, agent address, and subject address, and its value is the `u32` score. The backend also decodes `flaggedv2` reports. Administrative event indexing is not currently shown in the dashboard. A failed or unauthorized call aborts before publishing an event.
 
@@ -123,6 +132,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `authorize_agent(admin, agent)` / `revoke_agent(admin, agent)` — manage legacy responder grants. `authorize_monitor` / `authorize_responder` and matching revoke methods manage roles independently. Batch methods handle up to 16 addresses; `revoke_self(agent)` lets an agent remove its own grant.
 - `authorize_agent_until(admin, agent, expires_at_ledger)` — grant responder access through a ledger-bounded expiry.
 - `set_agent_capacity(admin, capacity)` / `get_agent_capacity()` / `get_agent_count()` / `get_agents(admin)` — manage and inspect the capped agent registry. `migrate_agent_capacity` supports existing instances.
+- `set_submission_quota(admin, window_ledgers, max_flags)` / `get_submission_quota()` / `get_agent_quota(agent)` — configure and inspect bounded per-agent submission usage.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold. Repeating the current value refreshes instance TTL without rewriting state or emitting a duplicate audit event.
 - `is_score_accepted(score)` — preflight the score range and active threshold; `flag_anomaly` remains authoritative.
 - `pause(admin)` / `unpause(admin)` / `set_paused(admin, paused)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
@@ -136,7 +146,14 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 
 Successful initialization and state-changing administrative calls publish the corresponding events described above. Read methods do not extend the TTL of each grant; expired grants are removed from the active registry when agent counts or lists are refreshed.
 
-Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and configure each network separately; never commit secrets.
+Only trusted addresses should receive agent authorization. Authorization helpers
+require the supplied address to authorize the invocation and then verify the
+stored role. Failed authorization, quota, score, or threshold checks occur
+before flag storage or events are written. Quota arithmetic is checked and
+bounded; malformed stored quota configuration fails closed. The contract enforces
+the score range and threshold, but it cannot establish that an off-chain score is
+accurate. Storage follows Soroban TTL and archival rules. Deploy, initialize, and
+configure each network separately; never commit secrets.
 
 Pausing is an emergency control for all flag submission methods. It does not erase existing flags or block read methods, and new deployments start unpaused. The administrator controls the standard pause; an optional guardian can pause, while only the administrator can resume a guardian pause.
 

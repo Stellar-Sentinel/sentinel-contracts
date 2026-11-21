@@ -161,6 +161,51 @@ fn admin_can_change_threshold_and_revoke_agents() {
 }
 
 #[test]
+fn quota_rejects_oversized_batches_atomically_and_resets() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.set_submission_quota(&admin, &2, &2);
+    client.flag_anomaly(&agent, &first, &70);
+    assert_eq!(client.get_agent_quota(&agent).used, 1);
+    let batch = vec![
+        &env,
+        FlagSubmission { subject: second.clone(), score: 70 },
+        FlagSubmission { subject: Address::generate(&env), score: 70 },
+    ];
+    assert!(client.try_flag_anomalies(&agent, &batch).is_err());
+    assert_eq!(client.get_latest_flag(&second), None);
+    env.ledger().set_sequence_number(2);
+    client.flag_anomaly(&agent, &second, &70);
+    assert_eq!(client.get_agent_quota(&agent).used, 1);
+}
+
+#[test]
+fn authorization_helper_rejects_wrong_role_without_writes() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let monitor = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_monitor(&admin, &monitor);
+    assert!(client.try_flag_anomaly(&monitor, &subject, &70).is_err());
+    assert_eq!(client.get_latest_flag(&subject), None);
+    assert!(!client.is_responder(&monitor));
+}
+
+#[test]
 fn admin_changes_emit_typed_configuration_events() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());

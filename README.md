@@ -9,6 +9,12 @@ Soroban contract for administrator-managed monitoring and response roles, a conf
 
 `get_agents` returns the administrator-authenticated list of active agents. The registry has a configurable capacity up to 128 addresses; repeated authorization is idempotent, and revocation or grant expiry releases capacity. Legacy `authorize_agent` grants responder access. Explicit monitor and responder roles can be managed independently. Expiring grants are supported for up to 100,000 ledgers.
 
+### Authorization invariants
+
+All administrator helpers require authorization by the currently stored administrator before reading or changing agent state. `authorize_monitor` grants monitoring access only, while `authorize_responder` grants flag-submission access only; `authorize_agent` remains the legacy responder-compatible entry point. An address may hold both roles, and revoking one role preserves the other. An agent cannot submit flags unless it has the responder role, and an expired grant is treated as inactive at its expiry ledger.
+
+Rejected authorization and flag-submission calls fail before any registry, latest-flag, or event write. Successful authorization changes publish `agent_add` with `(administrator, agent)` topics and `true`; `revoke_agent` publishes the matching `agent_del` event with `false`. Existing `authorize_monitor`, `authorize_responder`, and revoke helpers preserve the existing ABI and storage keys, so deployed instances remain compatible.
+
 ## Architecture
 
 ```mermaid
@@ -89,6 +95,14 @@ stellar contract invoke \
 ```
 
 Set the resulting contract ID as the backend's `CONTRACT_ID`. Keep its Horizon and Soroban RPC endpoints on Testnet as well.
+
+### Migration, rollback, and emergency response
+
+For an existing deployment, call `migrate_storage_version --admin <ADMIN>` once with the current administrator. It only backfills the schema marker when absent and rejects unsupported versions; it does not rewrite agent roles, flags, or events. If an instance predates the agent registry, call `migrate_agent_capacity --admin <ADMIN> --active-count <COUNT> --capacity <CAPACITY>` with verified values before using capacity-sensitive helpers. Verify `get_storage_version`, `get_agent_count`, `get_agents`, and the role views after migration.
+
+Authorization changes are ordinary Soroban transactions and are not reversible by a contract upgrade. To roll back a mistaken grant, revoke the affected role (or call `revoke_agent`) and confirm the registry and role views; previously published events remain immutable. Keep the prior deployment and its contract ID available until consumers have been verified against the replacement.
+
+For an incident, the administrator can call `pause` or `set_paused --paused true`; a configured guardian can call `guardian_pause` without resume authority. Confirm `is_paused` and `is_guardian_paused`, then resume with `unpause` or `resume_from_guardian_pause` only after the incident is contained. These controls block all flag-submission entry points but leave read-only configuration and latest-flag views available.
 
 ## Project layout
 

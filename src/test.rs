@@ -536,6 +536,37 @@ fn monitor_and_responder_authority_are_separate_and_revocable() {
 }
 
 #[test]
+fn legacy_authorization_preserves_responder_compatibility_and_rejections_are_atomic() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    assert!(!client.is_monitor(&agent));
+    assert!(client.is_responder(&agent));
+
+    let event_count = env.events().all().len();
+    assert!(client.try_flag_anomaly(&stranger, &subject, &80).is_err());
+    assert_eq!(client.get_latest_flag(&subject), None);
+    assert_eq!(env.events().all().len(), event_count);
+
+    client.flag_anomaly(&agent, &subject, &80);
+    let accepted = client.get_latest_flag(&subject);
+    assert!(accepted.is_some());
+    client.revoke_responder(&admin, &agent);
+    assert!(!client.is_agent(&agent));
+    assert_eq!(client.get_latest_flag(&subject), accepted);
+    assert!(client.try_flag_anomaly(&agent, &subject, &90).is_err());
+    assert_eq!(client.get_latest_flag(&subject), accepted);
+}
+
+#[test]
 fn agent_capacity_and_self_revoke_keep_registry_consistent() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());

@@ -132,6 +132,9 @@ read-only Testnet verification.
 For storage retention, archival restore, migration, and rollback procedures,
 see [`docs/TTL_ARCHIVAL_OPERATIONS.md`](docs/TTL_ARCHIVAL_OPERATIONS.md).
 
+The reviewed invariants, boundary cases, RPC examples, and versioning rules
+are in [`docs/EVENT_TOPIC_SCHEMA_DESIGN.md`](docs/EVENT_TOPIC_SCHEMA_DESIGN.md).
+
 The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar contract build --locked` creates the optimized deployable artifact under `target/wasm32v1-none/release/`. CI runs the Wasm build, tests, and lint checks (Clippy).
 
 ## Contract interface

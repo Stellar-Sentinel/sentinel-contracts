@@ -152,6 +152,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 - `authorize_agent_until(admin, agent, expires_at_ledger)` — grant responder access through a ledger-bounded expiry.
 - `set_agent_capacity(admin, capacity)` / `get_agent_capacity()` / `get_agent_count()` / `get_agents(admin)` — manage and inspect the capped agent registry. `migrate_agent_capacity` supports existing instances.
 - `set_threshold(admin, threshold)` / `get_threshold()` — configure/read the threshold. Repeating the current value refreshes instance TTL without rewriting state or emitting a duplicate audit event.
+- `set_submission_quota(admin, window_ledgers, max_flags)` / `get_submission_quota()` — configure or inspect the bounded per-agent circuit-breaker quota. Existing deployments use the documented defaults when these keys are absent.
 - `is_score_accepted(score)` — preflight the score range and active threshold; `flag_anomaly` remains authoritative.
 - `pause(admin)` / `unpause(admin)` / `set_paused(admin, paused)` / `is_paused()` — stop or resume new flag submissions; read operations remain available.
 - `set_emergency_guardian(admin, guardian)` / `guardian_pause(guardian)` / `resume_from_guardian_pause(admin)` — provide a guardian with pause-only emergency authority.
@@ -211,7 +212,7 @@ Pausing is an emergency control for all flag submission methods. It does not era
 
 ### Circuit-breaker runbook
 
-Use the standard pause when the administrator detects abnormal flag volume or a compromised responder. A configured guardian may call `guardian_pause` immediately; only the administrator can call `resume_from_guardian_pause`. Both latches must be clear before submissions resume, and rejected calls do not write a latest flag or publish a flag event.
+Use the standard pause when the administrator detects abnormal flag volume or a compromised responder. Each responder also has a bounded submission quota (default: 16 flags per 100 ledgers); exhaustion rejects the call without writing a latest flag or publishing a flag event. A configured guardian may call `guardian_pause` immediately; only the administrator can call `resume_from_guardian_pause`. Both latches must be clear before submissions resume.
 
 The pause events are deterministic and contain no report data: `pause` has topics `(pause, administrator)` and a boolean value; guardian activation and recovery use `(gpause, guardian)` and `(gunpause, administrator)` with boolean values. Existing `flagged` and `flaggedv2` events are unchanged. Consumers should treat either pause latch as a submission circuit breaker and keep read paths available for incident response.
 

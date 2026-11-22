@@ -19,6 +19,9 @@ pub enum DataKey {
     StorageVersion,
     EmergencyGuardian,
     GuardianPaused,
+    QuotaWindow,
+    QuotaLimit,
+    AgentQuota(Address),
 }
 
 /// Latest flag recorded for a subject. Soroban events remain the append-only
@@ -46,6 +49,14 @@ pub struct FlagSubmission {
 pub struct ContractConfig {
     pub admin: Address,
     pub threshold: u32,
+}
+
+/// Bounded per-agent submission usage within a ledger window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuotaState {
+    pub window_start: u32,
+    pub used: u32,
 }
 
 /// Bounded read-only snapshot of non-sensitive operator configuration.
@@ -95,6 +106,7 @@ const INIT_EVENT: Symbol = symbol_short!("init");
 const PAUSE_EVENT: Symbol = symbol_short!("pause");
 const GUARDIAN_PAUSE_EVENT: Symbol = symbol_short!("gpause");
 const GUARDIAN_RESUME_EVENT: Symbol = symbol_short!("gunpause");
+const QUOTA_EVENT: Symbol = symbol_short!("quota");
 const MAX_SCORE: u32 = 100;
 const MAX_POLICY_ID: u32 = 1_000_000;
 const MAX_REASON_MASK: u32 = 0xFFFF;
@@ -108,6 +120,10 @@ const MAX_AGENT_BATCH: u32 = 16;
 const HARD_AGENT_CAPACITY: u32 = 128;
 const MAX_AGENT_GRANT_LEDGERS: u32 = 100_000;
 const STORAGE_VERSION: u32 = 1;
+const DEFAULT_QUOTA_WINDOW: u32 = 100;
+const DEFAULT_QUOTA_LIMIT: u32 = 16;
+const MAX_QUOTA_WINDOW: u32 = 100_000;
+const MAX_QUOTA_LIMIT: u32 = 16;
 
 #[contract]
 pub struct StellarSentinel;
@@ -148,6 +164,12 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &STORAGE_VERSION);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaWindow, &DEFAULT_QUOTA_WINDOW);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaLimit, &DEFAULT_QUOTA_LIMIT);
         env.events()
             .publish((INIT_EVENT, admin.clone()), default_threshold);
         env.storage()
@@ -458,6 +480,42 @@ impl StellarSentinel {
             .publish((THRESHOLD_EVENT, admin), (previous, threshold));
     }
 
+    /// Configure the bounded per-agent submission quota.
+    pub fn set_submission_quota(env: Env, admin: Address, window_ledgers: u32, max_flags: u32) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if window_ledgers == 0 || window_ledgers > MAX_QUOTA_WINDOW {
+            panic!("quota window must be between 1 and 100000 ledgers");
+        }
+        if max_flags == 0 || max_flags > MAX_QUOTA_LIMIT {
+            panic!("quota limit must be between 1 and 16 flags");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaWindow, &window_ledgers);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaLimit, &max_flags);
+        bump_instance_ttl(&env);
+        env.events()
+            .publish((QUOTA_EVENT, admin), (window_ledgers, max_flags));
+    }
+
+    pub fn get_submission_quota(env: Env) -> (u32, u32) {
+        let window = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuotaWindow)
+            .unwrap_or(DEFAULT_QUOTA_WINDOW);
+        let limit = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuotaLimit)
+            .unwrap_or(DEFAULT_QUOTA_LIMIT);
+        bump_instance_ttl(&env);
+        (window, limit)
+    }
+
     pub fn set_paused(env: Env, admin: Address, paused: bool) {
         admin.require_auth();
         require_admin(&env, &admin);
@@ -573,6 +631,7 @@ impl StellarSentinel {
         if score < threshold {
             panic!("score below risk threshold");
         }
+        consume_agent_quota(&env, &agent, 1);
         let key = DataKey::LatestFlag(subject.clone());
         let record = FlagRecord {
             agent: agent.clone(),
@@ -606,6 +665,7 @@ impl StellarSentinel {
         if score < threshold {
             panic!("score below risk threshold");
         }
+        consume_agent_quota(&env, &agent, 1);
         let key = DataKey::LatestFlag(subject.clone());
         let record = FlagRecord {
             agent: agent.clone(),
@@ -696,6 +756,7 @@ impl StellarSentinel {
                 panic!("score below risk threshold");
             }
         }
+        consume_agent_quota(&env, &agent, submissions.len());
         for submission in submissions {
             let key = DataKey::LatestFlag(submission.subject.clone());
             let record = FlagRecord {
@@ -958,6 +1019,37 @@ fn require_submissions_unpaused(env: &Env) {
     {
         panic!("emergency guardian paused contract");
     }
+}
+
+fn consume_agent_quota(env: &Env, agent: &Address, amount: u32) {
+    let window = env
+        .storage()
+        .instance()
+        .get(&DataKey::QuotaWindow)
+        .unwrap_or(DEFAULT_QUOTA_WINDOW);
+    let limit = env
+        .storage()
+        .instance()
+        .get(&DataKey::QuotaLimit)
+        .unwrap_or(DEFAULT_QUOTA_LIMIT);
+    let key = DataKey::AgentQuota(agent.clone());
+    let current = env.ledger().sequence();
+    let mut state = env
+        .storage()
+        .persistent()
+        .get::<_, QuotaState>(&key)
+        .unwrap_or(QuotaState { window_start: current, used: 0 });
+    if current.saturating_sub(state.window_start) >= window {
+        state = QuotaState { window_start: current, used: 0 };
+    }
+    if amount > limit || state.used > limit - amount {
+        panic!("agent submission quota exceeded");
+    }
+    state.used += amount;
+    env.storage().persistent().set(&key, &state);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
 }
 
 fn require_admin(env: &Env, admin: &Address) {

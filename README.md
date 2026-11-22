@@ -129,6 +129,9 @@ See [`docs/EVENT_SCHEMA.md`](docs/EVENT_SCHEMA.md) for the stable topic/value
 contract, [`docs/WASM_BUDGET.md`](docs/WASM_BUDGET.md) for release budgets, and
 [`docs/DEPLOYMENT_VERIFICATION.md`](docs/DEPLOYMENT_VERIFICATION.md) for
 read-only Testnet verification.
+For storage retention, archival restore, migration, and rollback procedures,
+see [`docs/TTL_ARCHIVAL_OPERATIONS.md`](docs/TTL_ARCHIVAL_OPERATIONS.md).
+
 The reviewed invariants, boundary cases, RPC examples, and versioning rules
 are in [`docs/EVENT_TOPIC_SCHEMA_DESIGN.md`](docs/EVENT_TOPIC_SCHEMA_DESIGN.md).
 
@@ -138,6 +141,7 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 
 - `get_interface_version()` — return the interface generation; increment it for incompatible method or event changes.
 - `get_contract_config()` — read the administrator and threshold together; returns `None` before initialization.
+- `get_configuration_snapshot()` — read a bounded configuration snapshot without refreshing TTLs. It includes optional administrator/guardian values, active-agent count, capacity, pause state, and storage version; agent identities remain available only through the administrator-authenticated `get_agents` method.
 - `get_configuration_view()` — read a bounded, non-sensitive snapshot of initialization, threshold, pause, guardian, capacity, active-agent count, and storage/interface versions. It is public, emits no event, preserves the existing ABI, and returns optional fields for legacy or uninitialized instances. See [`docs/read-only-configuration-views.md`](docs/read-only-configuration-views.md).
 - `get_storage_version()` / `migrate_storage_version(admin)` — inspect and backfill the instance storage schema version.
 - `initialize(admin, default_threshold)` — one-time admin and threshold setup.
@@ -163,6 +167,45 @@ The CI Wasm artifact is under `target/wasm32-unknown-unknown/release/`. `stellar
 Successful initialization and state-changing administrative calls publish the corresponding events described above. Agent-grant reads do not extend each grant's TTL; expired grants are removed from the active registry when agent counts or lists are refreshed. `get_latest_flag` refreshes a live persistent flag record when it is read, using the same bounded threshold and bump as flag writes.
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. The contract instance and latest-flag records use persistent Soroban storage and renew their TTL only at bounded extension points: initialization, state-changing calls, live latest-flag writes, and latest-flag reads. If a persistent entry has already been archived, the caller must include a Soroban restore operation in the transaction footprint before invoking a method that reads it; the contract cannot restore an archived entry from inside the invocation. Events remain append-only history even if a latest-flag record is archived or cleared. Deploy, initialize, and configure each network separately; never commit secrets.
+
+## Storage TTL and archival operations
+
+The contract uses instance storage for configuration and registry metadata, and persistent storage
+for per-agent, expiry, and latest-flag records. Read/write entry points that operate on existing
+state extend the relevant TTL using the constants in `src/lib.rs`; read-only views do not recreate
+expired records. A successful maintenance read is therefore not proof that an archived entry still
+exists. If a persistent entry has expired, restore the exact Soroban ledger key through the RPC
+restore flow, then re-run the original read or transaction. Never synthesize an agent, flag, or
+expiry record from an event alone.
+
+The storage version is an instance value. Existing deployments keep their original key encoding;
+`migrate_storage_version(admin)` only backfills a missing version and rejects unknown versions.
+This is additive and does not change the ABI or require a migration for already versioned
+instances. Deployments should record the contract ID, Wasm hash, network passphrase, and the exact
+restore footprint used during maintenance.
+
+## Contract error conventions
+
+Validation is ordered from initialization and authorization, to pause state, to shape/range
+validation, and finally to threshold or state checks. A rejected call publishes no success event
+and rolls back its state changes. Existing entry points and event schemas remain stable; clients
+should match the documented error text/selectors only for diagnostics and must treat unknown
+errors as failure rather than assuming a flag was accepted.
+
+For a secret-free Testnet verification, set the contract ID and a locally configured Stellar CLI
+identity, then run:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_interface_version
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_storage_version
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_contract_config
+```
+
+These are read-only checks. They do not expose signing material, alter the deployed instance, or
+replace the locked build, test, and Clippy checks required by CI.
 
 Pausing is an emergency control for all flag submission methods. It does not erase existing flags or block read methods, and new deployments start unpaused. The administrator controls the standard pause; an optional guardian can pause, while only the administrator can resume a guardian pause.
 

@@ -168,6 +168,45 @@ Successful initialization and state-changing administrative calls publish the co
 
 Only trusted addresses should receive agent authorization. The contract enforces the score range and threshold, but it cannot establish that an off-chain score is accurate. The contract instance and latest-flag records use persistent Soroban storage and renew their TTL only at bounded extension points: initialization, state-changing calls, live latest-flag writes, and latest-flag reads. If a persistent entry has already been archived, the caller must include a Soroban restore operation in the transaction footprint before invoking a method that reads it; the contract cannot restore an archived entry from inside the invocation. Events remain append-only history even if a latest-flag record is archived or cleared. Deploy, initialize, and configure each network separately; never commit secrets.
 
+## Storage TTL and archival operations
+
+The contract uses instance storage for configuration and registry metadata, and persistent storage
+for per-agent, expiry, and latest-flag records. Read/write entry points that operate on existing
+state extend the relevant TTL using the constants in `src/lib.rs`; read-only views do not recreate
+expired records. A successful maintenance read is therefore not proof that an archived entry still
+exists. If a persistent entry has expired, restore the exact Soroban ledger key through the RPC
+restore flow, then re-run the original read or transaction. Never synthesize an agent, flag, or
+expiry record from an event alone.
+
+The storage version is an instance value. Existing deployments keep their original key encoding;
+`migrate_storage_version(admin)` only backfills a missing version and rejects unknown versions.
+This is additive and does not change the ABI or require a migration for already versioned
+instances. Deployments should record the contract ID, Wasm hash, network passphrase, and the exact
+restore footprint used during maintenance.
+
+## Contract error conventions
+
+Validation is ordered from initialization and authorization, to pause state, to shape/range
+validation, and finally to threshold or state checks. A rejected call publishes no success event
+and rolls back its state changes. Existing entry points and event schemas remain stable; clients
+should match the documented error text/selectors only for diagnostics and must treat unknown
+errors as failure rather than assuming a flag was accepted.
+
+For a secret-free Testnet verification, set the contract ID and a locally configured Stellar CLI
+identity, then run:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_interface_version
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_storage_version
+stellar contract invoke --id "$CONTRACT_ID" --source-account "$STELLAR_IDENTITY" \
+  --network testnet --send=no -- get_contract_config
+```
+
+These are read-only checks. They do not expose signing material, alter the deployed instance, or
+replace the locked build, test, and Clippy checks required by CI.
+
 Pausing is an emergency control for all flag submission methods. It does not erase existing flags or block read methods, and new deployments start unpaused. The administrator controls the standard pause; an optional guardian can pause, while only the administrator can resume a guardian pause.
 
 ### Circuit-breaker runbook

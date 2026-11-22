@@ -51,6 +51,7 @@ pub struct ContractConfig {
     pub threshold: u32,
 }
 
+/// Bounded per-agent submission usage within a ledger window.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuotaState {
@@ -163,8 +164,12 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &STORAGE_VERSION);
-        env.storage().instance().set(&DataKey::QuotaWindow, &DEFAULT_QUOTA_WINDOW);
-        env.storage().instance().set(&DataKey::QuotaLimit, &DEFAULT_QUOTA_LIMIT);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaWindow, &DEFAULT_QUOTA_WINDOW);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaLimit, &DEFAULT_QUOTA_LIMIT);
         env.events()
             .publish((INIT_EVENT, admin.clone()), default_threshold);
         env.storage()
@@ -475,6 +480,7 @@ impl StellarSentinel {
             .publish((THRESHOLD_EVENT, admin), (previous, threshold));
     }
 
+    /// Configure the bounded per-agent submission quota.
     pub fn set_submission_quota(env: Env, admin: Address, window_ledgers: u32, max_flags: u32) {
         admin.require_auth();
         require_admin(&env, &admin);
@@ -1051,7 +1057,6 @@ fn consume_agent_quota(env: &Env, agent: &Address, amount: u32) {
     state.used = state.used.checked_add(amount).expect("quota usage overflow");
     env.storage().persistent().set(&key, &state);
     env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
-    env.events().publish((QUOTA_EVENT, agent.clone()), state);
 }
 
 fn bump_instance_ttl(env: &Env) {

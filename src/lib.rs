@@ -51,6 +51,7 @@ pub struct ContractConfig {
     pub threshold: u32,
 }
 
+/// Bounded per-agent submission usage within a ledger window.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuotaState {
@@ -163,8 +164,12 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &STORAGE_VERSION);
-        env.storage().instance().set(&DataKey::QuotaWindow, &DEFAULT_QUOTA_WINDOW);
-        env.storage().instance().set(&DataKey::QuotaLimit, &DEFAULT_QUOTA_LIMIT);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaWindow, &DEFAULT_QUOTA_WINDOW);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaLimit, &DEFAULT_QUOTA_LIMIT);
         env.events()
             .publish((INIT_EVENT, admin.clone()), default_threshold);
         env.storage()
@@ -485,15 +490,28 @@ impl StellarSentinel {
         if max_flags == 0 || max_flags > MAX_QUOTA_LIMIT {
             panic!("quota limit must be between 1 and 16 flags");
         }
-        env.storage().instance().set(&DataKey::QuotaWindow, &window_ledgers);
-        env.storage().instance().set(&DataKey::QuotaLimit, &max_flags);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaWindow, &window_ledgers);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuotaLimit, &max_flags);
         bump_instance_ttl(&env);
-        env.events().publish((QUOTA_EVENT, admin), (window_ledgers, max_flags));
+        env.events()
+            .publish((QUOTA_EVENT, admin), (window_ledgers, max_flags));
     }
 
     pub fn get_submission_quota(env: Env) -> (u32, u32) {
-        let window = env.storage().instance().get(&DataKey::QuotaWindow).unwrap_or(DEFAULT_QUOTA_WINDOW);
-        let limit = env.storage().instance().get(&DataKey::QuotaLimit).unwrap_or(DEFAULT_QUOTA_LIMIT);
+        let window = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuotaWindow)
+            .unwrap_or(DEFAULT_QUOTA_WINDOW);
+        let limit = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuotaLimit)
+            .unwrap_or(DEFAULT_QUOTA_LIMIT);
         bump_instance_ttl(&env);
         (window, limit)
     }
@@ -1029,7 +1047,9 @@ fn consume_agent_quota(env: &Env, agent: &Address, amount: u32) {
     }
     state.used += amount;
     env.storage().persistent().set(&key, &state);
-    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
 }
 
 fn require_admin(env: &Env, admin: &Address) {

@@ -59,6 +59,22 @@ pub struct QuotaState {
     pub used: u32,
 }
 
+/// Bounded read-only snapshot of non-sensitive operator configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigurationSnapshot {
+    pub interface_version: u32,
+    pub initialized: bool,
+    pub admin: Option<Address>,
+    pub threshold: Option<u32>,
+    pub paused: bool,
+    pub guardian_paused: bool,
+    pub emergency_guardian: Option<Address>,
+    pub agent_count: u32,
+    pub agent_capacity: Option<u32>,
+    pub storage_version: Option<u32>,
+}
+
 /// Bounded, non-sensitive configuration metadata for operators.
 ///
 /// Optional fields distinguish an uninitialized or older instance from a
@@ -181,6 +197,26 @@ impl StellarSentinel {
         }
     }
 
+    /// Return the public configuration snapshot without renewing TTLs.
+    ///
+    /// Agent identities remain available only through the administrator-authenticated
+    /// `get_agents` method; this aggregate view exposes the active count only.
+    pub fn get_configuration_snapshot(env: Env) -> ConfigurationSnapshot {
+        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        ConfigurationSnapshot {
+            interface_version: INTERFACE_VERSION,
+            initialized: admin.is_some(),
+            admin,
+            threshold: env.storage().instance().get(&DataKey::RiskThreshold),
+            paused: env.storage().instance().get(&DataKey::Paused).unwrap_or(false),
+            guardian_paused: env.storage().instance().get(&DataKey::GuardianPaused).unwrap_or(false),
+            emergency_guardian: env.storage().instance().get(&DataKey::EmergencyGuardian),
+            agent_count: active_agent_count_read_only(&env),
+            agent_capacity: env.storage().instance().get(&DataKey::AgentCapacity),
+            storage_version: env.storage().instance().get(&DataKey::StorageVersion),
+        }
+    }
+
     /// Return bounded, non-sensitive configuration metadata in one read.
     ///
     /// This view is public and does not emit events or rewrite configuration
@@ -194,11 +230,7 @@ impl StellarSentinel {
             admin,
             threshold: env.storage().instance().get(&DataKey::RiskThreshold),
             paused: env.storage().instance().get(&DataKey::Paused).unwrap_or(false),
-            guardian_paused: env
-                .storage()
-                .instance()
-                .get(&DataKey::GuardianPaused)
-                .unwrap_or(false),
+            guardian_paused: env.storage().instance().get(&DataKey::GuardianPaused).unwrap_or(false),
             emergency_guardian: env.storage().instance().get(&DataKey::EmergencyGuardian),
             agent_count: active_agent_count_read_only(&env),
             agent_capacity: env.storage().instance().get(&DataKey::AgentCapacity),

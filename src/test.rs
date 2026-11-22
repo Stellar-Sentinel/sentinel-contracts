@@ -22,6 +22,66 @@ fn test_initialize_and_threshold() {
 }
 
 #[test]
+fn configuration_snapshot_is_bounded_and_read_only() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    env.mock_all_auths();
+
+    let before = client.get_configuration_snapshot();
+    assert_eq!(before.admin, None);
+    assert_eq!(before.threshold, None);
+    assert_eq!(before.interface_version, INTERFACE_VERSION);
+    assert!(!before.initialized);
+    assert_eq!(before.agent_count, 0);
+    assert_eq!(before.agent_capacity, None);
+    assert_eq!(before.storage_version, None);
+
+    client.initialize(&admin, &75);
+    client.authorize_agent(&admin, &agent);
+    client.set_emergency_guardian(&admin, &guardian);
+    client.pause(&admin);
+
+    let snapshot = client.get_configuration_snapshot();
+    assert_eq!(snapshot.admin, Some(admin));
+    assert_eq!(snapshot.threshold, Some(75));
+    assert!(snapshot.initialized);
+    assert_eq!(snapshot.agent_count, 1);
+    assert_eq!(snapshot.agent_capacity, Some(HARD_AGENT_CAPACITY));
+    assert!(snapshot.paused);
+    assert_eq!(snapshot.emergency_guardian, Some(guardian));
+    assert!(!snapshot.guardian_paused);
+    assert_eq!(snapshot.storage_version, Some(STORAGE_VERSION));
+}
+
+#[test]
+fn configuration_snapshot_excludes_expired_agents_without_repairing_storage() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &75);
+    client.authorize_agent_until(&admin, &agent, &10);
+    env.ledger().set_sequence_number(10);
+
+    let snapshot = client.get_configuration_snapshot();
+    assert_eq!(snapshot.agent_count, 0);
+    let (still_authorized, registry_count) = env.as_contract(&contract_id, || {
+        let authorized: bool = env.storage().instance().get(&DataKey::Agent(agent.clone())).unwrap_or(false);
+        let registered: Vec<Address> = env.storage().instance().get(&DataKey::AgentRegistry).unwrap();
+        (authorized, registered.len())
+    });
+    assert!(still_authorized);
+    assert_eq!(registry_count, 1);
+}
+
+#[test]
 fn administrator_transfer_requires_both_parties_and_preserves_state() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());

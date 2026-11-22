@@ -224,6 +224,62 @@ fn admin_can_change_threshold_and_revoke_agents() {
 }
 
 #[test]
+fn per_agent_quota_is_bounded_and_batch_consumption_is_atomic() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    client.set_submission_quota(&admin, &10, &2);
+    assert_eq!(client.get_submission_quota(), (10, 2));
+    client.flag_anomaly(&agent, &first, &70);
+    client.flag_anomaly(&agent, &second, &70);
+    assert!(client.try_flag_anomaly(&agent, &Address::generate(&env), &70).is_err());
+    assert_eq!(client.get_latest_flag(&first).unwrap().score, 70);
+
+    let third = Address::generate(&env);
+    let fourth = Address::generate(&env);
+    assert!(client
+        .try_flag_anomalies(
+            &agent,
+            &vec![
+                &env,
+                FlagSubmission { subject: third.clone(), score: 70 },
+                FlagSubmission { subject: fourth.clone(), score: 70 },
+            ],
+        )
+        .is_err());
+    assert_eq!(client.get_latest_flag(&third), None);
+    assert_eq!(client.get_latest_flag(&fourth), None);
+}
+
+#[test]
+fn quota_rejects_invalid_configuration_and_resets_after_window() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let subject = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    client.authorize_agent(&admin, &agent);
+    assert!(client.try_set_submission_quota(&admin, &0, &1).is_err());
+    assert!(client.try_set_submission_quota(&admin, &1, &(MAX_QUOTA_LIMIT + 1)).is_err());
+    client.set_submission_quota(&admin, &1, &1);
+    client.flag_anomaly(&agent, &subject, &70);
+    env.ledger().set_sequence_number(2);
+    client.flag_anomaly(&agent, &subject, &70);
+}
+
+#[test]
 fn admin_changes_emit_typed_configuration_events() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());

@@ -218,6 +218,8 @@ The pause events are deterministic and contain no report data: `pause` has topic
 
 For a deployment or migration, read `get_storage_version` first, run `migrate_storage_version(admin)` only when the instance is an older supported schema, then verify `is_paused`, `is_guardian_paused`, and `get_interface_version`. Roll back by pausing submissions and restoring the prior application deployment; Soroban contract code is not upgraded in place, so a new contract instance requires a separate initialization and compatibility review.
 
+The cross-repository release matrix and upgrade order are documented in [`docs/release-compatibility-matrix.md`](docs/release-compatibility-matrix.md).
+
 For Testnet verification without secrets:
 
 ```bash

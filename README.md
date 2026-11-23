@@ -9,6 +9,14 @@ Soroban contract for administrator-managed monitoring and response roles, a conf
 
 `get_agents` returns the administrator-authenticated list of active agents. The registry has a configurable capacity up to 128 addresses; repeated authorization is idempotent, and revocation or grant expiry releases capacity. Legacy `authorize_agent` grants responder access. Explicit monitor and responder roles can be managed independently. Expiring grants are supported for up to 100,000 ledgers.
 
+Flag submissions use a bounded per-agent quota. New instances default to 16
+flags per 100 ledgers; administrators can set a smaller window and limit within
+the contract bounds. Single and batch entry points consume the same counter, and
+a batch is rejected before any flag writes when it would exceed the limit. Quota
+configuration and usage are exposed through typed `quota` events; only counters,
+addresses, and ledger positions are stored. Existing deployments without quota
+keys use these defaults until explicitly configured.
+
 ### Authorization invariants
 
 All administrator helpers require authorization by the currently stored administrator before reading or changing agent state. `authorize_monitor` grants monitoring access only, while `authorize_responder` grants flag-submission access only; `authorize_agent` remains the legacy responder-compatible entry point. An address may hold both roles, and revoking one role preserves the other. An agent cannot submit flags unless it has the responder role, and an expired grant is treated as inactive at its expiry ledger.

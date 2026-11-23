@@ -484,36 +484,32 @@ impl StellarSentinel {
     pub fn set_submission_quota(env: Env, admin: Address, window_ledgers: u32, max_flags: u32) {
         admin.require_auth();
         require_admin(&env, &admin);
-        if window_ledgers == 0 || window_ledgers > MAX_QUOTA_WINDOW {
-            panic!("quota window must be between 1 and 100000 ledgers");
-        }
-        if max_flags == 0 || max_flags > MAX_QUOTA_LIMIT {
-            panic!("quota limit must be between 1 and 16 flags");
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::QuotaWindow, &window_ledgers);
-        env.storage()
-            .instance()
-            .set(&DataKey::QuotaLimit, &max_flags);
+        validate_quota_config(window_ledgers, max_flags);
+        env.storage().instance().set(&DataKey::QuotaWindow, &window_ledgers);
+        env.storage().instance().set(&DataKey::QuotaLimit, &max_flags);
         bump_instance_ttl(&env);
-        env.events()
-            .publish((QUOTA_EVENT, admin), (window_ledgers, max_flags));
+        env.events().publish((QUOTA_EVENT, admin), (window_ledgers, max_flags));
     }
 
     pub fn get_submission_quota(env: Env) -> (u32, u32) {
-        let window = env
-            .storage()
-            .instance()
-            .get(&DataKey::QuotaWindow)
-            .unwrap_or(DEFAULT_QUOTA_WINDOW);
-        let limit = env
-            .storage()
-            .instance()
-            .get(&DataKey::QuotaLimit)
-            .unwrap_or(DEFAULT_QUOTA_LIMIT);
+        let (window, limit) = configured_quota(&env);
         bump_instance_ttl(&env);
         (window, limit)
+    }
+
+    pub fn get_agent_quota(env: Env, agent: Address) -> QuotaState {
+        let (window, _) = configured_quota(&env);
+        let current = env.ledger().sequence();
+        let state = env
+            .storage()
+            .persistent()
+            .get::<_, QuotaState>(&DataKey::AgentQuota(agent))
+            .unwrap_or(QuotaState { window_start: current, used: 0 });
+        if current.saturating_sub(state.window_start) >= window {
+            QuotaState { window_start: current, used: 0 }
+        } else {
+            state
+        }
     }
 
     pub fn set_paused(env: Env, admin: Address, paused: bool) {
@@ -616,10 +612,7 @@ impl StellarSentinel {
     /// the stable `flagged` event and records the latest flag for the subject.
     pub fn flag_anomaly(env: Env, agent: Address, subject: Address, score: u32) {
         require_submissions_unpaused(&env);
-        agent.require_auth();
-        if !has_responder_role(&env, &agent) {
-            panic!("not an authorized agent");
-        }
+        require_responder(&env, &agent);
         if score > MAX_SCORE {
             panic!("score must be between 0 and 100");
         }
@@ -650,10 +643,7 @@ impl StellarSentinel {
     /// Submit a flag linked to an off-chain report digest without storing report contents.
     pub fn flag_anomaly_v2(env: Env, agent: Address, subject: Address, score: u32, report_digest: BytesN<32>) {
         require_submissions_unpaused(&env);
-        agent.require_auth();
-        if !has_responder_role(&env, &agent) {
-            panic!("not an authorized agent");
-        }
+        require_responder(&env, &agent);
         if score > MAX_SCORE {
             panic!("score must be between 0 and 100");
         }
@@ -736,12 +726,9 @@ impl StellarSentinel {
     /// Submit up to MAX_FLAG_BATCH risk flags in one authorized transaction.
     pub fn flag_anomalies(env: Env, agent: Address, submissions: Vec<FlagSubmission>) {
         require_submissions_unpaused(&env);
-        agent.require_auth();
+        require_responder(&env, &agent);
         if submissions.is_empty() || submissions.len() > MAX_FLAG_BATCH {
             panic!("flag batch size must be between 1 and 16");
-        }
-        if !has_responder_role(&env, &agent) {
-            panic!("not an authorized agent");
         }
         let threshold: u32 = env
             .storage()
@@ -1021,17 +1008,39 @@ fn require_submissions_unpaused(env: &Env) {
     }
 }
 
+fn require_admin(env: &Env, admin: &Address) {
+    let stored_admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("not initialized");
+    if stored_admin != *admin {
+        panic!("unauthorized");
+    }
+}
+
+fn require_responder(env: &Env, agent: &Address) {
+    agent.require_auth();
+    if !has_responder_role(env, agent) {
+        panic!("not an authorized agent");
+    }
+}
+
+fn validate_quota_config(window: u32, limit: u32) {
+    if window == 0 || window > MAX_QUOTA_WINDOW || limit == 0 || limit > MAX_QUOTA_LIMIT {
+        panic!("invalid quota configuration");
+    }
+}
+
+fn configured_quota(env: &Env) -> (u32, u32) {
+    let window = env.storage().instance().get(&DataKey::QuotaWindow).unwrap_or(DEFAULT_QUOTA_WINDOW);
+    let limit = env.storage().instance().get(&DataKey::QuotaLimit).unwrap_or(DEFAULT_QUOTA_LIMIT);
+    validate_quota_config(window, limit);
+    (window, limit)
+}
+
 fn consume_agent_quota(env: &Env, agent: &Address, amount: u32) {
-    let window = env
-        .storage()
-        .instance()
-        .get(&DataKey::QuotaWindow)
-        .unwrap_or(DEFAULT_QUOTA_WINDOW);
-    let limit = env
-        .storage()
-        .instance()
-        .get(&DataKey::QuotaLimit)
-        .unwrap_or(DEFAULT_QUOTA_LIMIT);
+    let (window, limit) = configured_quota(env);
     let key = DataKey::AgentQuota(agent.clone());
     let current = env.ledger().sequence();
     let mut state = env
@@ -1045,22 +1054,9 @@ fn consume_agent_quota(env: &Env, agent: &Address, amount: u32) {
     if amount > limit || state.used > limit - amount {
         panic!("agent submission quota exceeded");
     }
-    state.used += amount;
+    state.used = state.used.checked_add(amount).expect("quota usage overflow");
     env.storage().persistent().set(&key, &state);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
-}
-
-fn require_admin(env: &Env, admin: &Address) {
-    let stored_admin: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .expect("not initialized");
-    if stored_admin != *admin {
-        panic!("unauthorized");
-    }
+    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
 }
 
 fn bump_instance_ttl(env: &Env) {

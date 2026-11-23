@@ -22,6 +22,21 @@ fn test_initialize_and_threshold() {
 }
 
 #[test]
+fn release_compatibility_versions_are_stable_and_storage_is_versioned_after_init() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+
+    assert_eq!(client.get_interface_version(), INTERFACE_VERSION);
+    assert_eq!(client.get_storage_version(), 0);
+    client.initialize(&admin, &75);
+    assert_eq!(client.get_interface_version(), INTERFACE_VERSION);
+    assert_eq!(client.get_storage_version(), STORAGE_VERSION);
+}
+
+#[test]
 fn configuration_snapshot_is_bounded_and_read_only() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());

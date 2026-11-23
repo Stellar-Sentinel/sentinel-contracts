@@ -51,6 +51,13 @@ pub struct ContractConfig {
     pub threshold: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitBreakerState {
+    pub paused: bool,
+    pub guardian_paused: bool,
+}
+
 /// Bounded per-agent submission usage within a ledger window.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -591,6 +598,17 @@ impl StellarSentinel {
             .instance()
             .get(&DataKey::GuardianPaused)
             .unwrap_or(false)
+    }
+
+    /// Return both circuit-breaker latches from one consistent read.
+    pub fn get_circuit_breaker_state(env: Env) -> CircuitBreakerState {
+        let paused = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let guardian_paused = env
+            .storage()
+            .instance()
+            .get(&DataKey::GuardianPaused)
+            .unwrap_or(false);
+        CircuitBreakerState { paused, guardian_paused }
     }
 
     pub fn is_agent(env: Env, agent: Address) -> bool {

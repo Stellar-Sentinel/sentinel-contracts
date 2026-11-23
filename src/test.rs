@@ -883,6 +883,38 @@ fn admin_and_guardian_pauses_gate_all_flag_submission_methods() {
 }
 
 #[test]
+fn circuit_breaker_snapshot_reports_both_latches_without_mutation() {
+    let env = Env::default();
+    let contract_id = env.register(StellarSentinel, ());
+    let client = StellarSentinelClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.initialize(&admin, &70);
+    assert_eq!(
+        client.get_circuit_breaker_state(),
+        CircuitBreakerState { paused: false, guardian_paused: false }
+    );
+    client.set_emergency_guardian(&admin, &guardian);
+    client.pause(&admin);
+    assert_eq!(
+        client.get_circuit_breaker_state(),
+        CircuitBreakerState { paused: true, guardian_paused: false }
+    );
+    client.guardian_pause(&guardian);
+    assert_eq!(
+        client.get_circuit_breaker_state(),
+        CircuitBreakerState { paused: true, guardian_paused: true }
+    );
+    client.resume_from_guardian_pause(&admin);
+    assert_eq!(
+        client.get_circuit_breaker_state(),
+        CircuitBreakerState { paused: true, guardian_paused: false }
+    );
+}
+
+#[test]
 fn circuit_breaker_guardian_recovery_is_atomic_and_emits_deterministic_events() {
     let env = Env::default();
     let contract_id = env.register(StellarSentinel, ());
